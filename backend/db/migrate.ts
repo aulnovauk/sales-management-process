@@ -514,6 +514,29 @@ async function createTables() {
     }
     console.log('Initial divisions seeded');
 
+    await sql`
+      CREATE TABLE IF NOT EXISTS employee_master (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        purse_id VARCHAR(50) NOT NULL UNIQUE,
+        name VARCHAR(255) NOT NULL,
+        circle VARCHAR(100),
+        zone VARCHAR(100),
+        designation VARCHAR(100),
+        reporting_purse_id VARCHAR(50),
+        employee_id VARCHAR(50),
+        is_linked BOOLEAN DEFAULT false,
+        linked_employee_id UUID REFERENCES employees(id),
+        linked_at TIMESTAMP,
+        created_at TIMESTAMP DEFAULT NOW() NOT NULL,
+        updated_at TIMESTAMP DEFAULT NOW() NOT NULL
+      );
+    `;
+    console.log('employee_master table created');
+
+    await sql`CREATE INDEX IF NOT EXISTS idx_employee_master_purse_id ON employee_master(purse_id);`;
+    await sql`CREATE INDEX IF NOT EXISTS idx_employee_master_reporting ON employee_master(reporting_purse_id);`;
+    await sql`CREATE INDEX IF NOT EXISTS idx_employee_master_linked ON employee_master(linked_employee_id);`;
+
     console.log('All tables created successfully!');
     await sql.end();
   } catch (error) {

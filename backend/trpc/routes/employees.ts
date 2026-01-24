@@ -1,7 +1,7 @@
 import { z } from "zod";
-import { eq, and, ilike, desc } from "drizzle-orm";
+import { eq, and, ilike, desc, isNotNull } from "drizzle-orm";
 import { createTRPCRouter, publicProcedure } from "../create-context";
-import { db, employees } from "@/backend/db";
+import { db, employees, employeeMaster } from "@/backend/db";
 
 export const employeesRouter = createTRPCRouter({
   getAll: publicProcedure
@@ -198,25 +198,92 @@ export const employeesRouter = createTRPCRouter({
   getByStaffId: publicProcedure
     .input(z.object({ staffId: z.string() }))
     .query(async ({ input }) => {
-      console.log("Fetching employee by staff ID:", input.staffId);
+      console.log("Fetching employee by Purse ID:", input.staffId);
+      
+      const masterRecord = await db.select().from(employeeMaster)
+        .where(eq(employeeMaster.purseId, input.staffId));
+      
+      if (!masterRecord[0]) {
+        console.log("No master record found for Purse ID:", input.staffId);
+        return null;
+      }
+      
+      const linkedEmployeeId = masterRecord[0].linkedEmployeeId;
+      if (!linkedEmployeeId) {
+        console.log("Master record found but not linked to any employee account");
+        return null;
+      }
+      
       const result = await db.select().from(employees)
         .where(and(
-          eq(employees.employeeNo, input.staffId),
+          eq(employees.id, linkedEmployeeId),
           eq(employees.isActive, true)
         ));
-      return result[0] || null;
+      
+      if (result[0]) {
+        return {
+          ...result[0],
+          employeeNo: input.staffId,
+        };
+      }
+      return null;
     }),
 
   searchByStaffId: publicProcedure
     .input(z.object({ query: z.string() }))
     .query(async ({ input }) => {
-      console.log("Searching employees by staff ID:", input.query);
+      console.log("Searching employees by Purse ID:", input.query);
       if (!input.query || input.query.length < 1) return [];
+      
+      const masterRecords = await db.select().from(employeeMaster)
+        .where(and(
+          ilike(employeeMaster.purseId, `%${input.query}%`),
+          isNotNull(employeeMaster.linkedEmployeeId)
+        ));
+      
+      if (masterRecords.length === 0) return [];
+      
+      const employeeIds = masterRecords.map(m => m.linkedEmployeeId).filter(Boolean) as string[];
+      const results = [];
+      
+      for (const empId of employeeIds) {
+        const emp = await db.select().from(employees)
+          .where(and(
+            eq(employees.id, empId),
+            eq(employees.isActive, true)
+          ));
+        if (emp[0]) {
+          const master = masterRecords.find(m => m.linkedEmployeeId === empId);
+          results.push({
+            ...emp[0],
+            employeeNo: master?.purseId || emp[0].employeeNo,
+          });
+        }
+      }
+      
+      return results;
+    }),
+
+  getByMobile: publicProcedure
+    .input(z.object({ mobile: z.string() }))
+    .query(async ({ input }) => {
+      console.log("Fetching employee by mobile:", input.mobile);
+      
       const result = await db.select().from(employees)
         .where(and(
-          ilike(employees.employeeNo, `%${input.query}%`),
+          eq(employees.phone, input.mobile),
           eq(employees.isActive, true)
         ));
-      return result;
+      
+      if (result[0]) {
+        const masterRecord = await db.select().from(employeeMaster)
+          .where(eq(employeeMaster.linkedEmployeeId, result[0].id));
+        
+        return {
+          ...result[0],
+          employeeNo: masterRecord[0]?.purseId || result[0].employeeNo,
+        };
+      }
+      return null;
     }),
 });

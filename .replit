@@ -1,0 +1,63 @@
+modules = ["nodejs-22", "postgresql-16"]
+[agent]
+expertMode = true
+
+[nix]
+channel = "stable-25_05"
+
+[workflows]
+runButton = "Project"
+
+[[workflows.workflow]]
+name = "Project"
+mode = "parallel"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "BSNL App"
+
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "Expo Mobile"
+
+[[workflows.workflow]]
+name = "BSNL App"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "bun run server.ts"
+waitForPort = 5000
+
+[workflows.workflow.metadata]
+outputType = "webview"
+
+[[workflows.workflow]]
+name = "Expo Mobile"
+author = "agent"
+
+[workflows.workflow.metadata]
+outputType = "console"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "bunx expo start --tunnel --clear"
+
+[[ports]]
+localPort = 5000
+externalPort = 80
+
+[[ports]]
+localPort = 8081
+externalPort = 8081
+
+[deployment]
+deploymentTarget = "autoscale"
+run = ["bun", "run", "server.ts"]
+build = ["bun", "run", "bunx", "expo", "export", "--platform", "web"]
+
+[userenv]
+
+[userenv.shared]
+EXPO_PUBLIC_RORK_API_BASE_URL = "https://fb7d3116-a1f9-4763-b6a6-55a8d8998025-00-1kpboypcb0ods.sisko.replit.dev"

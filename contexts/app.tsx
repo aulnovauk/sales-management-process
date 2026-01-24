@@ -22,7 +22,16 @@ export const [AppProvider, useApp] = createContextHook(() => {
 
   const eventsQuery = trpc.events.getAll.useQuery(undefined, {
     retry: 1,
-    refetchOnWindowFocus: false,
+    refetchOnWindowFocus: true,
+    refetchInterval: 10000,
+    staleTime: 5000,
+  });
+
+  const resourcesQuery = trpc.resources.getAll.useQuery(undefined, {
+    retry: 1,
+    refetchOnWindowFocus: true,
+    refetchInterval: 15000,
+    staleTime: 10000,
   });
 
   useEffect(() => {
@@ -47,12 +56,32 @@ export const [AppProvider, useApp] = createContextHook(() => {
         createdAt: e.createdAt,
         keyInsight: e.keyInsight,
         status: e.status || 'active',
+        assignedTo: e.assignedTo,
+        simsSold: e.simSold || 0,
+        ftthSold: e.ftthSold || 0,
       }));
       console.log('Formatted events from backend:', formattedEvents.length);
       setEvents(formattedEvents);
       AsyncStorage.setItem(EVENTS_KEY, JSON.stringify(formattedEvents));
     }
   }, [eventsQuery.data]);
+
+  useEffect(() => {
+    if (resourcesQuery.data) {
+      const formattedResources: Resource[] = resourcesQuery.data.map((r: any) => ({
+        id: r.id,
+        type: r.type,
+        circle: r.circle,
+        total: r.total,
+        allocated: r.allocated,
+        used: r.used,
+        remaining: r.remaining,
+        updatedAt: r.updatedAt,
+      }));
+      setResources(formattedResources);
+      AsyncStorage.setItem(RESOURCES_KEY, JSON.stringify(formattedResources));
+    }
+  }, [resourcesQuery.data]);
 
   useEffect(() => {
     loadData();
@@ -85,6 +114,15 @@ export const [AppProvider, useApp] = createContextHook(() => {
   const refetchEvents = useCallback(() => {
     eventsQuery.refetch();
   }, [eventsQuery]);
+
+  const refetchResources = useCallback(() => {
+    resourcesQuery.refetch();
+  }, [resourcesQuery]);
+
+  const refetchAll = useCallback(() => {
+    eventsQuery.refetch();
+    resourcesQuery.refetch();
+  }, [eventsQuery, resourcesQuery]);
 
   const addEvent = useCallback(async (event: Event) => {
     const updated = [...events, event];
@@ -152,6 +190,7 @@ export const [AppProvider, useApp] = createContextHook(() => {
     employees,
     isLoading,
     isLoadingEvents: eventsQuery.isLoading,
+    isLoadingResources: resourcesQuery.isLoading,
     addEvent,
     updateEvent,
     addSalesReport,
@@ -162,5 +201,7 @@ export const [AppProvider, useApp] = createContextHook(() => {
     addEmployees,
     clearAllData,
     refetchEvents,
+    refetchResources,
+    refetchAll,
   };
 });

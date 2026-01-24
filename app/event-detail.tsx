@@ -1,7 +1,7 @@
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useEffect } from 'react';
 import { View, Text, StyleSheet, ScrollView, TouchableOpacity, TextInput, Alert, RefreshControl, Modal } from 'react-native';
 import { Stack, useRouter, useLocalSearchParams } from 'expo-router';
-import { MapPin, Calendar, Users, Plus, Trash2, Camera, User, X, Edit3, Play, Pause, CheckCircle, XCircle, ChevronRight, Clock, Flag, ListTodo } from 'lucide-react-native';
+import { MapPin, Calendar, Users, Plus, Trash2, Camera, User, X, Edit3, Play, Pause, CheckCircle, XCircle, ChevronRight, Clock, Flag, ListTodo, Zap, AlertCircle, Settings } from 'lucide-react-native';
 import { useAuth } from '@/contexts/auth';
 import Colors from '@/constants/colors';
 import { trpc } from '@/lib/trpc';
@@ -23,11 +23,11 @@ const STATUS_COLORS: Record<SubtaskStatus, { bg: string; text: string }> = {
 };
 
 const EVENT_STATUS_CONFIG: Record<EventStatus, { label: string; color: string; bg: string; icon: string; description: string }> = {
-  draft: { label: 'Draft', color: '#78909C', bg: '#ECEFF1', icon: 'file', description: 'Event is being prepared' },
-  active: { label: 'Active', color: '#2E7D32', bg: '#E8F5E9', icon: 'play', description: 'Event is live and running' },
-  paused: { label: 'Paused', color: '#EF6C00', bg: '#FFF3E0', icon: 'pause', description: 'Event is temporarily paused' },
-  completed: { label: 'Completed', color: '#1565C0', bg: '#E3F2FD', icon: 'check', description: 'Event has been completed' },
-  cancelled: { label: 'Cancelled', color: '#C62828', bg: '#FFEBEE', icon: 'x', description: 'Event has been cancelled' },
+  draft: { label: 'Draft', color: '#78909C', bg: '#ECEFF1', icon: 'file', description: 'Work is being prepared' },
+  active: { label: 'Active', color: '#2E7D32', bg: '#E8F5E9', icon: 'play', description: 'Work is live and running' },
+  paused: { label: 'Paused', color: '#EF6C00', bg: '#FFF3E0', icon: 'pause', description: 'Work is temporarily paused' },
+  completed: { label: 'Completed', color: '#1565C0', bg: '#E3F2FD', icon: 'check', description: 'Work has been completed' },
+  cancelled: { label: 'Cancelled', color: '#C62828', bg: '#FFEBEE', icon: 'x', description: 'Work has been cancelled' },
 };
 
 const STATUS_TRANSITIONS: Record<EventStatus, EventStatus[]> = {
@@ -40,7 +40,7 @@ const STATUS_TRANSITIONS: Record<EventStatus, EventStatus[]> = {
 
 export default function EventDetailScreen() {
   const router = useRouter();
-  const { id } = useLocalSearchParams<{ id: string }>();
+  const { id, edit } = useLocalSearchParams<{ id: string; edit?: string }>();
   const { employee } = useAuth();
   
   const [refreshing, setRefreshing] = useState(false);
@@ -68,6 +68,8 @@ export default function EventDetailScreen() {
   const [subtaskStaffId, setSubtaskStaffId] = useState('');
   const [subtaskPriority, setSubtaskPriority] = useState<SubtaskPriority>('medium');
   const [subtaskDueDate, setSubtaskDueDate] = useState('');
+  const [subtaskSimAllocated, setSubtaskSimAllocated] = useState('');
+  const [subtaskFtthAllocated, setSubtaskFtthAllocated] = useState('');
   const [editingSubtask, setEditingSubtask] = useState<string | null>(null);
   const [foundEmployee, setFoundEmployee] = useState<{ id: string; name: string; designation?: string } | null>(null);
   const [searchingEmployee, setSearchingEmployee] = useState(false);
@@ -92,9 +94,17 @@ export default function EventDetailScreen() {
   console.log('Event Detail - Error:', isError, error?.message);
   console.log('Event Detail - Data:', eventData ? 'Found' : 'Not found');
   
+  const managerPurseId = eventData?.assignedToEmployee ? 
+    (eventData.assignedToEmployee as any).purseId || null : null;
+  
   const { data: availableMembers } = trpc.events.getAvailableTeamMembers.useQuery(
-    { circle: eventData?.circle as Circle, eventId: id },
+    { circle: eventData?.circle as Circle, eventId: id, managerPurseId: managerPurseId || undefined },
     { enabled: !!eventData?.circle && !!id }
+  );
+  
+  const { data: resourceStatus } = trpc.events.getEventResourceStatus.useQuery(
+    { eventId: id || '' },
+    { enabled: !!id && id.length > 0 }
   );
   
   const assignMemberMutation = trpc.events.assignTeamMember.useMutation({
@@ -121,7 +131,7 @@ export default function EventDetailScreen() {
 
   const updateEventMutation = trpc.events.update.useMutation({
     onSuccess: () => {
-      Alert.alert('Success', 'Event updated successfully');
+      Alert.alert('Success', 'Work updated successfully');
       refetch();
       setShowEditModal(false);
     },
@@ -132,7 +142,7 @@ export default function EventDetailScreen() {
 
   const updateStatusMutation = trpc.events.updateEventStatus.useMutation({
     onSuccess: () => {
-      Alert.alert('Success', 'Event status updated');
+      Alert.alert('Success', 'Work status updated');
       refetch();
       setShowStatusModal(false);
     },
@@ -200,6 +210,8 @@ export default function EventDetailScreen() {
     setSubtaskStaffId('');
     setSubtaskPriority('medium');
     setSubtaskDueDate('');
+    setSubtaskSimAllocated('');
+    setSubtaskFtthAllocated('');
     setEditingSubtask(null);
     setFoundEmployee(null);
   };
@@ -232,6 +244,8 @@ export default function EventDetailScreen() {
     setSubtaskStaffId(subtask.assignedEmployee?.employeeNo || '');
     setSubtaskPriority(subtask.priority);
     setSubtaskDueDate(subtask.dueDate ? new Date(subtask.dueDate).toISOString().split('T')[0] : '');
+    setSubtaskSimAllocated(subtask.simAllocated?.toString() || '');
+    setSubtaskFtthAllocated(subtask.ftthAllocated?.toString() || '');
     if (subtask.assignedEmployee) {
       setFoundEmployee({ id: subtask.assignedEmployee.id, name: subtask.assignedEmployee.name, designation: subtask.assignedEmployee.designation });
     } else {
@@ -245,7 +259,8 @@ export default function EventDetailScreen() {
     await refetch();
     setRefreshing(false);
   }, [refetch]);
-  
+
+    
   const handleAssignMember = () => {
     if (!selectedMemberId) {
       Alert.alert('Error', 'Please select a team member');
@@ -292,10 +307,10 @@ export default function EventDetailScreen() {
     
     const confirmMessages: Record<EventStatus, { title: string; message: string }> = {
       draft: { title: 'Revert to Draft?', message: 'This will move the event back to draft status. You can edit and reactivate it later.' },
-      active: { title: 'Activate Event?', message: 'This will make the event active and visible to team members. Sales can be submitted.' },
-      paused: { title: 'Pause Event?', message: 'This will temporarily pause the event. Team members will not be able to submit sales. You can resume anytime.' },
-      completed: { title: 'Complete Event?', message: 'This will mark the event as completed. Make sure all sales are submitted before completing.' },
-      cancelled: { title: 'Cancel Event?', message: 'This will cancel the event. This action is reversible but should be done with caution.' },
+      active: { title: 'Activate Work?', message: 'This will make the work active and visible to team members. Sales can be submitted.' },
+      paused: { title: 'Pause Work?', message: 'This will temporarily pause the work. Team members will not be able to submit sales. You can resume anytime.' },
+      completed: { title: 'Complete Work?', message: 'This will mark the work as completed. Make sure all sales are submitted before completing.' },
+      cancelled: { title: 'Cancel Work?', message: 'This will cancel the work. This action is reversible but should be done with caution.' },
     };
     
     const { title, message } = confirmMessages[newStatus];
@@ -326,11 +341,11 @@ export default function EventDetailScreen() {
       return;
     }
     if (!subtaskStaffId.trim()) {
-      Alert.alert('Error', 'Please enter Staff ID');
+      Alert.alert('Error', 'Please enter Purse ID');
       return;
     }
     if (!foundEmployee && !subtaskAssignee) {
-      Alert.alert('Error', 'Please enter a valid Staff ID and verify the employee');
+      Alert.alert('Error', 'Please enter a valid Purse ID and verify the employee');
       return;
     }
     if (!employee?.id) return;
@@ -343,6 +358,8 @@ export default function EventDetailScreen() {
         assignedTo: foundEmployee?.id || subtaskAssignee || null,
         priority: subtaskPriority,
         dueDate: subtaskDueDate || null,
+        simAllocated: parseInt(subtaskSimAllocated) || 0,
+        ftthAllocated: parseInt(subtaskFtthAllocated) || 0,
         updatedBy: employee.id,
       });
     } else {
@@ -354,6 +371,8 @@ export default function EventDetailScreen() {
         staffId: subtaskStaffId || undefined,
         priority: subtaskPriority,
         dueDate: subtaskDueDate || undefined,
+        simAllocated: parseInt(subtaskSimAllocated) || 0,
+        ftthAllocated: parseInt(subtaskFtthAllocated) || 0,
         createdBy: employee.id,
       });
     }
@@ -419,8 +438,35 @@ export default function EventDetailScreen() {
     );
   };
   
-  const canManageTeam = canCreateEvents(employee?.role || 'SALES_STAFF');
+  const isEventManager = eventData?.assignedToEmployee?.id === employee?.id;
+  const isEventCreator = eventData?.createdBy === employee?.id;
+  const canManageTeam = canCreateEvents(employee?.role || 'SALES_STAFF') || isEventManager || isEventCreator;
   const isTeamMember = eventData?.teamWithAllocations?.some(t => t.employeeId === employee?.id);
+
+  const isDraftEvent = eventData?.status === 'draft';
+  
+  const getDraftChecklist = () => {
+    if (!eventData) return [];
+    const checks = [
+      { label: 'Work Name', done: !!eventData.name },
+      { label: 'Location', done: !!eventData.location },
+      { label: 'Date Range', done: !!eventData.startDate && !!eventData.endDate },
+      { label: 'Work Manager Assigned', done: !!eventData.assignedTo },
+      { label: 'Team Members Added', done: (eventData.teamWithAllocations?.length || 0) > 0 },
+      { label: 'SIM/FTTH Targets Set', done: (eventData.targetSim || 0) > 0 || (eventData.targetFtth || 0) > 0 },
+    ];
+    return checks;
+  };
+  
+  const draftChecklist = getDraftChecklist();
+  const completedChecks = draftChecklist.filter(c => c.done).length;
+  const isReadyToActivate = completedChecks >= 4;
+
+  useEffect(() => {
+    if (edit === 'true' && eventData && canManageTeam) {
+      openEditModal();
+    }
+  }, [edit, eventData?.id, canManageTeam]);
   
   const getEventStatus = (): EventStatus => {
     if (!eventData) return 'draft';
@@ -474,15 +520,15 @@ export default function EventDetailScreen() {
   
   const availableTransitions = STATUS_TRANSITIONS[dbStatus] || [];
   
-  const unassignedMembers = availableMembers?.filter(m => !m.isAssigned) || [];
+  const unassignedMembers = availableMembers?.filter(m => !m.isAssigned && m.id !== eventData?.assignedTo) || [];
   
 
   if (!id) {
     return (
       <>
-        <Stack.Screen options={{ title: 'Event Details', headerStyle: { backgroundColor: Colors.light.primary }, headerTintColor: Colors.light.background }} />
+        <Stack.Screen options={{ title: 'Work Details', headerStyle: { backgroundColor: Colors.light.primary }, headerTintColor: Colors.light.background }} />
         <View style={styles.loadingContainer}>
-          <Text style={styles.errorTitle}>Invalid Event</Text>
+          <Text style={styles.errorTitle}>Invalid Work</Text>
           <Text style={styles.errorText}>No event ID provided</Text>
           <TouchableOpacity style={styles.retryButton} onPress={() => router.back()}>
             <Text style={styles.retryButtonText}>Go Back</Text>
@@ -495,7 +541,7 @@ export default function EventDetailScreen() {
   if (isLoading) {
     return (
       <>
-        <Stack.Screen options={{ title: 'Event Details', headerStyle: { backgroundColor: Colors.light.primary }, headerTintColor: Colors.light.background }} />
+        <Stack.Screen options={{ title: 'Work Details', headerStyle: { backgroundColor: Colors.light.primary }, headerTintColor: Colors.light.background }} />
         <View style={styles.loadingContainer}>
           <View style={styles.loadingSpinner}>
             <Text style={styles.loadingIcon}>⏳</Text>
@@ -511,10 +557,10 @@ export default function EventDetailScreen() {
     console.error('Event Detail Error:', error);
     return (
       <>
-        <Stack.Screen options={{ title: 'Event Details', headerStyle: { backgroundColor: Colors.light.primary }, headerTintColor: Colors.light.background }} />
+        <Stack.Screen options={{ title: 'Work Details', headerStyle: { backgroundColor: Colors.light.primary }, headerTintColor: Colors.light.background }} />
         <View style={styles.loadingContainer}>
           <Text style={styles.errorIcon}>⚠️</Text>
-          <Text style={styles.errorTitle}>Failed to Load Event</Text>
+          <Text style={styles.errorTitle}>Failed to Load Work</Text>
           <Text style={styles.errorText}>{error?.message || 'An unexpected error occurred'}</Text>
           <TouchableOpacity style={styles.retryButton} onPress={() => refetch()}>
             <Text style={styles.retryButtonText}>Retry</Text>
@@ -530,10 +576,10 @@ export default function EventDetailScreen() {
   if (!eventData) {
     return (
       <>
-        <Stack.Screen options={{ title: 'Event Details', headerStyle: { backgroundColor: Colors.light.primary }, headerTintColor: Colors.light.background }} />
+        <Stack.Screen options={{ title: 'Work Details', headerStyle: { backgroundColor: Colors.light.primary }, headerTintColor: Colors.light.background }} />
         <View style={styles.loadingContainer}>
           <Text style={styles.errorIcon}>🔍</Text>
-          <Text style={styles.errorTitle}>Event Not Found</Text>
+          <Text style={styles.errorTitle}>Work Not Found</Text>
           <Text style={styles.errorText}>The event you are looking for does not exist or has been removed.</Text>
           <TouchableOpacity style={styles.retryButton} onPress={() => refetch()}>
             <Text style={styles.retryButtonText}>Retry</Text>
@@ -596,7 +642,66 @@ export default function EventDetailScreen() {
           </View>
         </View>
 
-        {canManageTeam && availableTransitions.length > 0 && (
+        {isDraftEvent && canManageTeam && (
+          <View style={styles.draftSetupPanel}>
+            <View style={styles.draftPanelHeader}>
+              <View style={styles.draftPanelIcon}>
+                <Settings size={24} color="#78909C" />
+              </View>
+              <View style={styles.draftPanelTitleContainer}>
+                <Text style={styles.draftPanelTitle}>Complete Event Setup</Text>
+                <Text style={styles.draftPanelSubtitle}>
+                  {completedChecks}/{draftChecklist.length} steps completed
+                </Text>
+              </View>
+            </View>
+            
+            <View style={styles.draftChecklist}>
+              {draftChecklist.map((item, index) => (
+                <View key={index} style={styles.checklistItem}>
+                  <View style={[styles.checklistIcon, item.done && styles.checklistIconDone]}>
+                    {item.done ? (
+                      <CheckCircle size={16} color="#2E7D32" />
+                    ) : (
+                      <View style={styles.checklistCircle} />
+                    )}
+                  </View>
+                  <Text style={[styles.checklistLabel, item.done && styles.checklistLabelDone]}>
+                    {item.label}
+                  </Text>
+                </View>
+              ))}
+            </View>
+
+            <View style={styles.draftActions}>
+              <TouchableOpacity style={styles.draftEditButton} onPress={openEditModal}>
+                <Edit3 size={18} color={Colors.light.primary} />
+                <Text style={styles.draftEditButtonText}>Edit Details</Text>
+              </TouchableOpacity>
+              
+              <TouchableOpacity 
+                style={[styles.draftActivateButton, !isReadyToActivate && styles.draftActivateButtonDisabled]}
+                onPress={() => isReadyToActivate && handleUpdateStatus('active')}
+              >
+                <Zap size={18} color="#fff" />
+                <Text style={styles.draftActivateButtonText}>
+                  {isReadyToActivate ? 'Activate Work' : 'Complete Setup First'}
+                </Text>
+              </TouchableOpacity>
+            </View>
+
+            {!isReadyToActivate && (
+              <View style={styles.draftWarning}>
+                <AlertCircle size={14} color="#EF6C00" />
+                <Text style={styles.draftWarningText}>
+                  Complete at least 4 checklist items before activating
+                </Text>
+              </View>
+            )}
+          </View>
+        )}
+
+        {canManageTeam && availableTransitions.length > 0 && !isDraftEvent && (
           <View style={styles.statusSection}>
             <View style={styles.currentStatusRow}>
               <Text style={styles.statusLabel}>Current Status:</Text>
@@ -681,6 +786,56 @@ export default function EventDetailScreen() {
             </View>
           </View>
         </View>
+        
+        {resourceStatus && (
+          <View style={styles.summarySection}>
+            <Text style={styles.sectionTitle}>Resource Allocation Status</Text>
+            <View style={styles.resourceStatusGrid}>
+              <View style={styles.resourceCard}>
+                <Text style={styles.resourceCardTitle}>SIM Resources</Text>
+                <View style={styles.resourceRow}>
+                  <Text style={styles.resourceLabel}>Allocated to Event:</Text>
+                  <Text style={styles.resourceValue}>{resourceStatus.allocated.sim}</Text>
+                </View>
+                <View style={styles.resourceRow}>
+                  <Text style={styles.resourceLabel}>Distributed to Team:</Text>
+                  <Text style={styles.resourceValue}>{resourceStatus.distributed.sim}</Text>
+                </View>
+                <View style={styles.resourceRow}>
+                  <Text style={styles.resourceLabel}>Sold:</Text>
+                  <Text style={[styles.resourceValue, { color: Colors.light.success }]}>{resourceStatus.sold.sim}</Text>
+                </View>
+                <View style={styles.resourceRow}>
+                  <Text style={styles.resourceLabel}>Available to Distribute:</Text>
+                  <Text style={[styles.resourceValue, { color: resourceStatus.remaining.simToDistribute > 0 ? Colors.light.primary : Colors.light.textSecondary }]}>
+                    {resourceStatus.remaining.simToDistribute}
+                  </Text>
+                </View>
+              </View>
+              <View style={styles.resourceCard}>
+                <Text style={styles.resourceCardTitle}>FTTH Resources</Text>
+                <View style={styles.resourceRow}>
+                  <Text style={styles.resourceLabel}>Allocated to Event:</Text>
+                  <Text style={styles.resourceValue}>{resourceStatus.allocated.ftth}</Text>
+                </View>
+                <View style={styles.resourceRow}>
+                  <Text style={styles.resourceLabel}>Distributed to Team:</Text>
+                  <Text style={styles.resourceValue}>{resourceStatus.distributed.ftth}</Text>
+                </View>
+                <View style={styles.resourceRow}>
+                  <Text style={styles.resourceLabel}>Sold:</Text>
+                  <Text style={[styles.resourceValue, { color: Colors.light.success }]}>{resourceStatus.sold.ftth}</Text>
+                </View>
+                <View style={styles.resourceRow}>
+                  <Text style={styles.resourceLabel}>Available to Distribute:</Text>
+                  <Text style={[styles.resourceValue, { color: resourceStatus.remaining.ftthToDistribute > 0 ? Colors.light.primary : Colors.light.textSecondary }]}>
+                    {resourceStatus.remaining.ftthToDistribute}
+                  </Text>
+                </View>
+              </View>
+            </View>
+          </View>
+        )}
 
         <View style={styles.subtasksSection}>
           <View style={styles.sectionHeader}>
@@ -771,6 +926,24 @@ export default function EventDetailScreen() {
                         </View>
                       )}
                     </View>
+                    {(subtask.simAllocated > 0 || subtask.ftthAllocated > 0) && (
+                      <View style={{ flexDirection: 'row', gap: 12, marginTop: 8 }}>
+                        {subtask.simAllocated > 0 && (
+                          <View style={{ flexDirection: 'row', alignItems: 'center', backgroundColor: '#E3F2FD', paddingHorizontal: 8, paddingVertical: 4, borderRadius: 4 }}>
+                            <Text style={{ fontSize: 11, color: '#1565C0', fontWeight: '600' }}>
+                              SIM: {subtask.simSold || 0}/{subtask.simAllocated}
+                            </Text>
+                          </View>
+                        )}
+                        {subtask.ftthAllocated > 0 && (
+                          <View style={{ flexDirection: 'row', alignItems: 'center', backgroundColor: '#E8F5E9', paddingHorizontal: 8, paddingVertical: 4, borderRadius: 4 }}>
+                            <Text style={{ fontSize: 11, color: '#2E7D32', fontWeight: '600' }}>
+                              FTTH: {subtask.ftthSold || 0}/{subtask.ftthAllocated}
+                            </Text>
+                          </View>
+                        )}
+                      </View>
+                    )}
                   </View>
                   {canManageTeam && (
                     <View style={styles.subtaskActions}>
@@ -788,27 +961,51 @@ export default function EventDetailScreen() {
           )}
         </View>
 
+        {eventData.assignedToEmployee && (
+          <View style={styles.managerSection}>
+            <Text style={styles.sectionTitle}>Work Manager</Text>
+            <View style={styles.managerCard}>
+              <View style={styles.memberInfo}>
+                <View style={[styles.avatarCircle, { backgroundColor: Colors.light.primary + '20' }]}>
+                  <User size={24} color={Colors.light.primary} />
+                </View>
+                <View>
+                  <Text style={styles.memberName}>{eventData.assignedToEmployee.name}</Text>
+                  <Text style={styles.memberRole}>
+                    {eventData.assignedToEmployee.designation || eventData.assignedToEmployee.role}
+                    {(eventData.assignedToEmployee as any).purseId ? ` | ${(eventData.assignedToEmployee as any).purseId}` : ''}
+                  </Text>
+                  <Text style={[styles.memberRole, { color: Colors.light.primary, fontWeight: '600' }]}>
+                    Manages team & assigns tasks
+                  </Text>
+                </View>
+              </View>
+            </View>
+          </View>
+        )}
+
         <View style={styles.teamSection}>
           <View style={styles.sectionHeader}>
-            <Text style={styles.sectionTitle}>Team Members ({eventData.teamWithAllocations?.length || 0})</Text>
+            <Text style={styles.sectionTitle}>Field Team ({eventData.teamWithAllocations?.filter((m: any) => m.employeeId !== eventData.assignedTo).length || 0})</Text>
             {canManageTeam && dbStatus !== 'completed' && dbStatus !== 'cancelled' && (
               <TouchableOpacity 
                 style={styles.addButton}
                 onPress={() => setShowAssignModal(true)}
               >
                 <Plus size={18} color={Colors.light.background} />
-                <Text style={styles.addButtonText}>Assign</Text>
+                <Text style={styles.addButtonText}>Assign Field Officer</Text>
               </TouchableOpacity>
             )}
           </View>
           
-          {eventData.teamWithAllocations?.length === 0 ? (
+          {eventData.teamWithAllocations?.filter((m: any) => m.employeeId !== eventData.assignedTo).length === 0 ? (
             <View style={styles.emptyTeam}>
               <Users size={40} color={Colors.light.textSecondary} />
-              <Text style={styles.emptyTeamText}>No team members assigned yet</Text>
+              <Text style={styles.emptyTeamText}>No field officers assigned yet</Text>
+              {canManageTeam && <Text style={styles.emptyTeamHint}>Tap "Assign Field Officer" to add team members</Text>}
             </View>
           ) : (
-            eventData.teamWithAllocations?.map((member: any) => (
+            eventData.teamWithAllocations?.filter((m: any) => m.employeeId !== eventData.assignedTo).map((member: any) => (
               <View key={member.id} style={styles.teamMemberCard}>
                 <View style={styles.memberHeader}>
                   <View style={styles.memberInfo}>
@@ -817,7 +1014,7 @@ export default function EventDetailScreen() {
                     </View>
                     <View>
                       <Text style={styles.memberName}>{member.employee?.name || 'Unknown'}</Text>
-                      <Text style={styles.memberRole}>{member.employee?.designation || member.employee?.role}</Text>
+                      <Text style={styles.memberRole}>{member.employee?.designation || member.employee?.role}{member.employee?.purseId ? ` | ${member.employee.purseId}` : ''}</Text>
                     </View>
                   </View>
                   {canManageTeam && dbStatus !== 'completed' && dbStatus !== 'cancelled' && (
@@ -938,14 +1135,14 @@ export default function EventDetailScreen() {
         <View style={styles.modalOverlay}>
           <View style={styles.modalContent}>
             <View style={styles.modalHeader}>
-              <Text style={styles.modalTitle}>Assign Team Member</Text>
+              <Text style={styles.modalTitle}>Assign Field Officer</Text>
               <TouchableOpacity onPress={() => setShowAssignModal(false)}>
                 <X size={24} color={Colors.light.text} />
               </TouchableOpacity>
             </View>
             
             <ScrollView style={styles.modalBody}>
-              <Text style={styles.inputLabel}>Select Team Member</Text>
+              <Text style={styles.inputLabel}>Select Field Officer</Text>
               <View style={styles.membersList}>
                 {unassignedMembers.length === 0 ? (
                   <Text style={styles.noMembersText}>No available team members in this circle</Text>
@@ -958,7 +1155,7 @@ export default function EventDetailScreen() {
                     >
                       <View style={styles.memberOptionInfo}>
                         <Text style={styles.memberOptionName}>{member.name}</Text>
-                        <Text style={styles.memberOptionRole}>{member.designation || member.role}</Text>
+                        <Text style={styles.memberOptionRole}>{member.designation || member.role}{member.purseId ? ` | ${member.purseId}` : ''}</Text>
                       </View>
                       {selectedMemberId === member.id && (
                         <View style={styles.checkmark}><Text style={styles.checkmarkText}>✓</Text></View>
@@ -967,6 +1164,14 @@ export default function EventDetailScreen() {
                   ))
                 )}
               </View>
+              
+              {resourceStatus && (
+                <View style={styles.resourceHint}>
+                  <Text style={styles.resourceHintText}>
+                    Available: SIM {resourceStatus.remaining.simToDistribute} | FTTH {resourceStatus.remaining.ftthToDistribute}
+                  </Text>
+                </View>
+              )}
               
               <Text style={styles.inputLabel}>SIM Target</Text>
               <TextInput style={styles.input} placeholder="Enter SIM target" value={simTarget} onChangeText={setSimTarget} keyboardType="number-pad" />
@@ -999,7 +1204,7 @@ export default function EventDetailScreen() {
             </View>
             
             <ScrollView style={styles.modalBody}>
-              <Text style={styles.inputLabel}>Event Name</Text>
+              <Text style={styles.inputLabel}>Work Name</Text>
               <TextInput style={styles.input} value={editName} onChangeText={setEditName} placeholder="Event name" />
               
               <Text style={styles.inputLabel}>Location</Text>
@@ -1061,22 +1266,22 @@ export default function EventDetailScreen() {
               <Text style={styles.inputLabel}>Description</Text>
               <TextInput style={[styles.input, styles.textArea]} value={subtaskDescription} onChangeText={setSubtaskDescription} placeholder="Description (optional)" multiline numberOfLines={3} />
               
-              <Text style={styles.inputLabel}>Assign To (Staff ID) *</Text>
-              <View style={styles.staffIdRow}>
+              <Text style={styles.inputLabel}>Assign To (Purse ID) *</Text>
+              <View style={styles.purseIdRow}>
                 <TextInput 
-                  style={[styles.input, styles.staffIdInput]} 
+                  style={[styles.input, styles.purseIdInput]} 
                   value={subtaskStaffId} 
                   onChangeText={(text) => {
                     setSubtaskStaffId(text);
                     setFoundEmployee(null);
                   }} 
-                  placeholder="e.g., 1" 
+                  placeholder="Enter Purse ID" 
                 />
                 <TouchableOpacity 
                   style={[styles.verifyButton, searchingEmployee && styles.buttonDisabled]}
                   onPress={async () => {
                     if (!subtaskStaffId.trim()) {
-                      Alert.alert('Error', 'Please enter a Staff ID');
+                      Alert.alert('Error', 'Please enter a Purse ID');
                       return;
                     }
                     setSearchingEmployee(true);
@@ -1087,7 +1292,7 @@ export default function EventDetailScreen() {
                         Alert.alert('Found', `Employee: ${result.name}`);
                       } else {
                         setFoundEmployee(null);
-                        Alert.alert('Not Found', 'No employee found with this Staff ID');
+                        Alert.alert('Not Found', 'No registered employee found with this Purse ID');
                       }
                     } catch (err) {
                       console.error('Error searching employee:', err);
@@ -1129,6 +1334,30 @@ export default function EventDetailScreen() {
               
               <Text style={styles.inputLabel}>Due Date</Text>
               <TextInput style={styles.input} value={subtaskDueDate} onChangeText={setSubtaskDueDate} placeholder="YYYY-MM-DD (optional)" />
+              
+              <Text style={[styles.inputLabel, { marginTop: 16, fontWeight: '600', color: Colors.light.primary }]}>Resource Allocation</Text>
+              <View style={{ flexDirection: 'row', gap: 12 }}>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.inputLabel}>SIM Allocation</Text>
+                  <TextInput 
+                    style={styles.input} 
+                    value={subtaskSimAllocated} 
+                    onChangeText={setSubtaskSimAllocated} 
+                    placeholder="0" 
+                    keyboardType="number-pad"
+                  />
+                </View>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.inputLabel}>FTTH Allocation</Text>
+                  <TextInput 
+                    style={styles.input} 
+                    value={subtaskFtthAllocated} 
+                    onChangeText={setSubtaskFtthAllocated} 
+                    placeholder="0" 
+                    keyboardType="number-pad"
+                  />
+                </View>
+              </View>
             </ScrollView>
             
             <View style={styles.modalFooter}>
@@ -1161,6 +1390,14 @@ export default function EventDetailScreen() {
             </View>
             
             <View style={styles.modalBody}>
+              {resourceStatus && (
+                <View style={styles.resourceHint}>
+                  <Text style={styles.resourceHintText}>
+                    Available: SIM {resourceStatus.remaining.simToDistribute + parseInt(editMemberSimTarget || '0')} | FTTH {resourceStatus.remaining.ftthToDistribute + parseInt(editMemberFtthTarget || '0')}
+                  </Text>
+                </View>
+              )}
+              
               <Text style={styles.inputLabel}>SIM Target</Text>
               <TextInput style={styles.input} value={editMemberSimTarget} onChangeText={setEditMemberSimTarget} keyboardType="number-pad" />
               
@@ -1202,7 +1439,7 @@ export default function EventDetailScreen() {
               <TouchableOpacity style={styles.statusOption} onPress={() => { setShowStatusModal(false); handleUpdateStatus('active'); }}>
                 <Play size={20} color={EVENT_STATUS_CONFIG.active.color} />
                 <View style={styles.statusOptionContent}>
-                  <Text style={styles.statusOptionText}>{dbStatus === 'paused' ? 'Resume Event' : 'Activate Event'}</Text>
+                  <Text style={styles.statusOptionText}>{dbStatus === 'paused' ? 'Resume Work' : 'Activate Work'}</Text>
                   <Text style={styles.statusOptionDesc}>{EVENT_STATUS_CONFIG.active.description}</Text>
                 </View>
               </TouchableOpacity>
@@ -1327,9 +1564,12 @@ const styles = StyleSheet.create({
   assigneeText: { fontSize: 10, color: Colors.light.primary },
   subtaskActions: { flexDirection: 'row', gap: 8 },
   subtaskActionBtn: { padding: 4 },
+  managerSection: { backgroundColor: Colors.light.card, padding: 16, marginBottom: 12 },
+  managerCard: { backgroundColor: Colors.light.backgroundSecondary, borderRadius: 10, padding: 12 },
   teamSection: { backgroundColor: Colors.light.card, padding: 16, marginBottom: 12 },
   emptyTeam: { alignItems: 'center', paddingVertical: 32 },
   emptyTeamText: { fontSize: 14, color: Colors.light.textSecondary, marginTop: 8 },
+  emptyTeamHint: { fontSize: 12, color: Colors.light.primary, marginTop: 4 },
   teamMemberCard: { backgroundColor: Colors.light.backgroundSecondary, borderRadius: 10, padding: 12, marginBottom: 10 },
   memberHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 },
   memberInfo: { flexDirection: 'row', alignItems: 'center', gap: 10 },
@@ -1361,6 +1601,14 @@ const styles = StyleSheet.create({
   gpsText: { fontSize: 10, color: Colors.light.success },
   photoIndicator: { flexDirection: 'row', alignItems: 'center', gap: 2, backgroundColor: '#E3F2FD', paddingHorizontal: 6, paddingVertical: 2, borderRadius: 4 },
   photoText: { fontSize: 10, color: Colors.light.info },
+  resourceStatusGrid: { gap: 12 },
+  resourceCard: { backgroundColor: Colors.light.backgroundSecondary, borderRadius: 10, padding: 12 },
+  resourceCardTitle: { fontSize: 14, fontWeight: '700' as const, color: Colors.light.text, marginBottom: 10 },
+  resourceRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingVertical: 4 },
+  resourceLabel: { fontSize: 12, color: Colors.light.textSecondary },
+  resourceValue: { fontSize: 13, fontWeight: '600' as const, color: Colors.light.text },
+  resourceHint: { backgroundColor: Colors.light.lightBlue, padding: 10, borderRadius: 8, marginTop: 12 },
+  resourceHintText: { fontSize: 12, color: Colors.light.primary, textAlign: 'center', fontWeight: '600' as const },
   bottomSpacer: { height: 32 },
   modalOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.5)', justifyContent: 'flex-end' },
   modalContent: { backgroundColor: Colors.light.background, borderTopLeftRadius: 20, borderTopRightRadius: 20, maxHeight: '85%' },
@@ -1409,12 +1657,33 @@ const styles = StyleSheet.create({
   statusOptionText: { fontSize: 16, color: Colors.light.text, marginBottom: 2 },
   statusOptionDesc: { fontSize: 12, color: Colors.light.textSecondary },
   noTransitionsText: { fontSize: 14, color: Colors.light.textSecondary, textAlign: 'center', paddingVertical: 16 },
-  staffIdRow: { flexDirection: 'row', gap: 8, alignItems: 'center' },
-  staffIdInput: { flex: 1 },
+  purseIdRow: { flexDirection: 'row', gap: 8, alignItems: 'center' },
+  purseIdInput: { flex: 1 },
   verifyButton: { backgroundColor: Colors.light.primary, paddingHorizontal: 16, paddingVertical: 12, borderRadius: 8 },
   verifyButtonText: { color: Colors.light.background, fontSize: 14, fontWeight: '600' as const },
   foundEmployeeCard: { flexDirection: 'row', alignItems: 'center', backgroundColor: '#E8F5E9', padding: 12, borderRadius: 8, marginTop: 8, gap: 10 },
   foundEmployeeInfo: { flex: 1 },
   foundEmployeeName: { fontSize: 14, fontWeight: '600' as const, color: Colors.light.text },
   foundEmployeeRole: { fontSize: 12, color: Colors.light.textSecondary },
+  draftSetupPanel: { backgroundColor: Colors.light.card, padding: 16, marginBottom: 12, borderLeftWidth: 4, borderLeftColor: '#78909C' },
+  draftPanelHeader: { flexDirection: 'row', alignItems: 'center', marginBottom: 16, gap: 12 },
+  draftPanelIcon: { width: 48, height: 48, borderRadius: 24, backgroundColor: '#ECEFF1', justifyContent: 'center', alignItems: 'center' },
+  draftPanelTitleContainer: { flex: 1 },
+  draftPanelTitle: { fontSize: 18, fontWeight: 'bold' as const, color: Colors.light.text, marginBottom: 2 },
+  draftPanelSubtitle: { fontSize: 13, color: Colors.light.textSecondary },
+  draftChecklist: { backgroundColor: '#FAFAFA', borderRadius: 10, padding: 12, marginBottom: 16 },
+  checklistItem: { flexDirection: 'row', alignItems: 'center', paddingVertical: 8, gap: 12 },
+  checklistIcon: { width: 24, height: 24, justifyContent: 'center', alignItems: 'center' },
+  checklistIconDone: {},
+  checklistCircle: { width: 18, height: 18, borderRadius: 9, borderWidth: 2, borderColor: '#CFD8DC' },
+  checklistLabel: { fontSize: 14, color: Colors.light.textSecondary },
+  checklistLabelDone: { color: Colors.light.text, textDecorationLine: 'line-through' },
+  draftActions: { flexDirection: 'row', gap: 12 },
+  draftEditButton: { flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8, paddingVertical: 14, paddingHorizontal: 16, borderRadius: 10, borderWidth: 1, borderColor: Colors.light.primary, backgroundColor: Colors.light.background },
+  draftEditButtonText: { fontSize: 15, fontWeight: '600' as const, color: Colors.light.primary },
+  draftActivateButton: { flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8, paddingVertical: 14, paddingHorizontal: 16, borderRadius: 10, backgroundColor: Colors.light.success },
+  draftActivateButtonDisabled: { backgroundColor: '#B0BEC5' },
+  draftActivateButtonText: { fontSize: 15, fontWeight: '600' as const, color: '#fff' },
+  draftWarning: { flexDirection: 'row', alignItems: 'center', backgroundColor: '#FFF3E0', padding: 12, borderRadius: 8, marginTop: 12, gap: 8 },
+  draftWarningText: { flex: 1, fontSize: 12, color: '#EF6C00' },
 });

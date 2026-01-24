@@ -5,34 +5,64 @@ import * as ImagePicker from 'expo-image-picker';
 import * as Location from 'expo-location';
 import { Camera, MapPin, Trash2 } from 'lucide-react-native';
 import { useAuth } from '@/contexts/auth';
-import { useApp } from '@/contexts/app';
+import { trpc } from '@/lib/trpc';
 import Colors from '@/constants/colors';
-import { SalesReport } from '@/types';
 import { CUSTOMER_TYPES } from '@/constants/app';
 
 export default function SubmitSalesScreen() {
   const router = useRouter();
   const { employee } = useAuth();
-  const { events, addSalesReport, addAuditLog } = useApp();
+  const { data: eventsData } = trpc.events.getAll.useQuery({});
+  const events = eventsData || [];
+  
+  const submitSalesMutation = trpc.events.submitEventSales.useMutation({
+    onSuccess: () => {
+      Alert.alert('Success', 'Sales submitted successfully! Your targets have been updated.', [
+        { text: 'OK', onPress: () => router.back() },
+      ]);
+    },
+    onError: (error) => {
+      Alert.alert('Error', error.message || 'Failed to submit sales');
+    },
+  });
   
   const [selectedEventId, setSelectedEventId] = useState('');
   const [simsSold, setSimsSold] = useState('');
   const [simsActivated, setSimsActivated] = useState('');
+  const [activatedMobileNumbers, setActivatedMobileNumbers] = useState('');
   const [ftthLeads, setFtthLeads] = useState('');
   const [ftthInstalled, setFtthInstalled] = useState('');
+  const [activatedFtthIds, setActivatedFtthIds] = useState('');
   const [customerType, setCustomerType] = useState<any>('B2C');
   const [remarks, setRemarks] = useState('');
   const [photos, setPhotos] = useState<string[]>([]);
   const [location, setLocation] = useState<{ latitude: number; longitude: number } | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
 
+  const parseNumbers = (text: string): string[] => {
+    return text.split('\n').map(n => n.trim()).filter(n => n.length > 0);
+  };
+
+  const countMobileNumbers = parseNumbers(activatedMobileNumbers).length;
+  const countFtthIds = parseNumbers(activatedFtthIds).length;
+  const expectedSimCount = parseInt(simsActivated) || 0;
+  const expectedFtthCount = parseInt(ftthInstalled) || 0;
+
+  const validateMobileNumber = (num: string): boolean => {
+    return /^[6-9]\d{9}$/.test(num);
+  };
+
+  const getInvalidMobileNumbers = (): string[] => {
+    return parseNumbers(activatedMobileNumbers).filter(n => !validateMobileNumber(n));
+  };
+
   const [showEventPicker, setShowEventPicker] = useState(false);
   const [showCustomerTypePicker, setShowCustomerTypePicker] = useState(false);
 
   const myEvents = events.filter(e => {
     const today = new Date();
-    const endDate = new Date(e.dateRange.endDate);
-    return endDate >= today;
+    const endDate = new Date(e.endDate);
+    return endDate >= today && e.status !== 'completed' && e.status !== 'cancelled';
   });
 
   const pickImage = async () => {
@@ -108,42 +138,39 @@ export default function SubmitSalesScreen() {
       return;
     }
 
+    if (expectedSimCount > 0 && countMobileNumbers !== expectedSimCount) {
+      Alert.alert('Error', `Please enter exactly ${expectedSimCount} mobile numbers (currently ${countMobileNumbers})`);
+      return;
+    }
+
+    const invalidNumbers = getInvalidMobileNumbers();
+    if (invalidNumbers.length > 0) {
+      Alert.alert('Invalid Mobile Numbers', `The following numbers are invalid (must be 10 digits starting with 6-9):\n${invalidNumbers.join('\n')}`);
+      return;
+    }
+
+    if (expectedFtthCount > 0 && countFtthIds !== expectedFtthCount) {
+      Alert.alert('Error', `Please enter exactly ${expectedFtthCount} FTTH IDs (currently ${countFtthIds})`);
+      return;
+    }
+
     setIsSubmitting(true);
 
-    const newSalesReport: SalesReport = {
-      id: Date.now().toString(),
-      eventId: selectedEventId,
-      salesStaffId: employee?.id || '',
-      simsSold: parseInt(simsSold) || 0,
-      simsActivated: parseInt(simsActivated) || 0,
-      ftthLeads: parseInt(ftthLeads) || 0,
-      ftthInstalled: parseInt(ftthInstalled) || 0,
-      customerType,
-      photos,
-      gpsLocation: location || undefined,
-      remarks: remarks.trim(),
-      createdAt: new Date().toISOString(),
-      synced: false,
-      status: 'pending',
-    };
-
     try {
-      await addSalesReport(newSalesReport);
-      await addAuditLog({
-        id: Date.now().toString(),
-        action: 'Submitted Sales Report',
-        entityType: 'SALES',
-        entityId: newSalesReport.id,
-        performedBy: employee?.id || '',
-        timestamp: new Date().toISOString(),
-        details: { simsSold: newSalesReport.simsSold, ftthLeads: newSalesReport.ftthLeads },
+      await submitSalesMutation.mutateAsync({
+        eventId: selectedEventId,
+        employeeId: employee?.id || '',
+        simsSold: parseInt(simsSold) || 0,
+        simsActivated: parseInt(simsActivated) || 0,
+        ftthSold: parseInt(ftthLeads) || 0,
+        ftthActivated: parseInt(ftthInstalled) || 0,
+        customerType,
+        gpsLatitude: location?.latitude?.toString(),
+        gpsLongitude: location?.longitude?.toString(),
+        remarks: remarks.trim() || undefined,
       });
-      
-      Alert.alert('Success', 'Sales report submitted successfully', [
-        { text: 'OK', onPress: () => router.back() },
-      ]);
     } catch (error) {
-      Alert.alert('Error', 'Failed to submit sales report');
+      // Error handled by mutation onError
     } finally {
       setIsSubmitting(false);
     }
@@ -168,13 +195,13 @@ export default function SubmitSalesScreen() {
       <ScrollView style={styles.container}>
         <View style={styles.form}>
           <View style={styles.inputGroup}>
-            <Text style={styles.label}>Select Event *</Text>
+            <Text style={styles.label}>Select Work *</Text>
             <TouchableOpacity 
               style={styles.picker}
               onPress={() => setShowEventPicker(!showEventPicker)}
             >
               <Text style={styles.pickerText}>
-                {selectedEvent ? selectedEvent.name : 'Choose an event'}
+                {selectedEvent ? selectedEvent.name : 'Choose a work'}
               </Text>
             </TouchableOpacity>
             {showEventPicker && (
@@ -223,6 +250,34 @@ export default function SubmitSalesScreen() {
                 />
               </View>
             </View>
+            
+            {expectedSimCount > 0 && (
+              <View style={styles.inputGroup}>
+                <View style={styles.labelRow}>
+                  <Text style={styles.label}>Activated Mobile Numbers *</Text>
+                  <Text style={[
+                    styles.countBadge, 
+                    countMobileNumbers === expectedSimCount ? styles.countMatch : styles.countMismatch
+                  ]}>
+                    {countMobileNumbers}/{expectedSimCount}
+                  </Text>
+                </View>
+                <TextInput
+                  style={[styles.input, styles.textArea]}
+                  placeholder="Enter one mobile number per line&#10;e.g.&#10;9876543210&#10;9876543211"
+                  value={activatedMobileNumbers}
+                  onChangeText={setActivatedMobileNumbers}
+                  multiline
+                  numberOfLines={5}
+                  keyboardType="number-pad"
+                />
+                {getInvalidMobileNumbers().length > 0 && (
+                  <Text style={styles.errorText}>
+                    Invalid: {getInvalidMobileNumbers().join(', ')}
+                  </Text>
+                )}
+              </View>
+            )}
           </View>
 
           <View style={styles.section}>
@@ -250,6 +305,28 @@ export default function SubmitSalesScreen() {
                 />
               </View>
             </View>
+            
+            {expectedFtthCount > 0 && (
+              <View style={styles.inputGroup}>
+                <View style={styles.labelRow}>
+                  <Text style={styles.label}>Activated FTTH IDs *</Text>
+                  <Text style={[
+                    styles.countBadge, 
+                    countFtthIds === expectedFtthCount ? styles.countMatch : styles.countMismatch
+                  ]}>
+                    {countFtthIds}/{expectedFtthCount}
+                  </Text>
+                </View>
+                <TextInput
+                  style={[styles.input, styles.textArea]}
+                  placeholder="Enter one FTTH ID per line&#10;e.g.&#10;FTTH123456&#10;FTTH123457"
+                  value={activatedFtthIds}
+                  onChangeText={setActivatedFtthIds}
+                  multiline
+                  numberOfLines={5}
+                />
+              </View>
+            )}
           </View>
 
           <View style={styles.inputGroup}>
@@ -387,7 +464,34 @@ const styles = StyleSheet.create({
     color: Colors.light.text,
   },
   textArea: {
-    minHeight: 100,
+    minHeight: 120,
+    textAlignVertical: 'top',
+  },
+  labelRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 8,
+  },
+  countBadge: {
+    fontSize: 12,
+    fontWeight: '600',
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 12,
+  },
+  countMatch: {
+    backgroundColor: '#E8F5E9',
+    color: '#2E7D32',
+  },
+  countMismatch: {
+    backgroundColor: '#FFEBEE',
+    color: '#C62828',
+  },
+  errorText: {
+    fontSize: 12,
+    color: '#C62828',
+    marginTop: 4,
   },
   row: {
     flexDirection: 'row',

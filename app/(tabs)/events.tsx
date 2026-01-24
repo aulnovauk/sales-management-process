@@ -1,12 +1,13 @@
-import { View, Text, StyleSheet, ScrollView, TouchableOpacity, TextInput } from 'react-native';
+import { View, Text, StyleSheet, ScrollView, TouchableOpacity, TextInput, Alert } from 'react-native';
 import { Stack, useRouter } from 'expo-router';
-import { Plus, Search, Calendar, MapPin, Users, Play, Pause, CheckCircle, XCircle, FileText } from 'lucide-react-native';
+import { Plus, Search, Calendar, MapPin, Users, Play, Pause, CheckCircle, XCircle, FileText, Edit3, ChevronRight, Zap } from 'lucide-react-native';
 import { useAuth } from '@/contexts/auth';
 import { useApp } from '@/contexts/app';
 import Colors from '@/constants/colors';
 import { useState, useMemo } from 'react';
 import { Event, EventStatus } from '@/types';
 import { canCreateEvents } from '@/constants/app';
+import { trpc } from '@/lib/trpc';
 
 const EVENT_STATUS_CONFIG: Record<EventStatus, { label: string; color: string; bg: string }> = {
   draft: { label: 'Draft', color: '#78909C', bg: '#ECEFF1' },
@@ -19,14 +20,67 @@ const EVENT_STATUS_CONFIG: Record<EventStatus, { label: string; color: string; b
 export default function EventsScreen() {
   const router = useRouter();
   const { employee } = useAuth();
-  const { events } = useApp();
+  const { events, refetchEvents } = useApp();
   const [searchQuery, setSearchQuery] = useState('');
+  
+  const updateStatusMutation = trpc.events.updateEventStatus.useMutation({
+    onSuccess: () => {
+      Alert.alert('Success', 'Work activated successfully! Team members can now submit sales.');
+      refetchEvents?.();
+    },
+    onError: (error) => {
+      Alert.alert('Error', error.message);
+    },
+  });
+
+  const handleActivateEvent = (eventId: string) => {
+    if (!employee?.id) return;
+    Alert.alert(
+      'Activate Work?',
+      'This will make the work active and visible to team members. Sales can be submitted once activated.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Activate',
+          style: 'default',
+          onPress: () => {
+            updateStatusMutation.mutate({
+              eventId,
+              status: 'active',
+              updatedBy: employee.id,
+            });
+          },
+        },
+      ]
+    );
+  };
+
+  const canEditEvent = canCreateEvents(employee?.role || 'SALES_STAFF');
 
   const filteredEvents = useMemo(() => {
     let filtered = events;
 
-    if (employee?.role !== 'GM') {
-      filtered = filtered.filter(e => e.circle === employee?.circle);
+    // Management roles (GM, CGM, DGM, AGM) see all events
+    // SD_JTO sees events in their circle or assigned to them
+    // SALES_STAFF only sees events they're specifically assigned to
+    const managementRoles = ['GM', 'CGM', 'DGM', 'AGM'];
+    const isManagement = managementRoles.includes(employee?.role || '');
+    const isSalesStaff = employee?.role === 'SALES_STAFF';
+    
+    if (!isManagement) {
+      filtered = filtered.filter(e => {
+        const isAssignedToMe = e.assignedTo === employee?.id;
+        const isInMyTeam = Array.isArray(e.assignedTeam) && e.assignedTeam.includes(employee?.id || '');
+        
+        // SALES_STAFF only sees events they're specifically assigned to
+        if (isSalesStaff) {
+          return isAssignedToMe || isInMyTeam;
+        }
+        
+        // SD_JTO sees circle events + assigned events
+        const isMyCircle = e.circle === employee?.circle;
+        return isMyCircle || isAssignedToMe || isInMyTeam;
+      });
     }
 
     if (searchQuery.trim()) {
@@ -87,7 +141,7 @@ export default function EventsScreen() {
     <>
       <Stack.Screen 
         options={{ 
-          title: 'Events',
+          title: 'Works',
           headerStyle: {
             backgroundColor: Colors.light.primary,
           },
@@ -113,7 +167,7 @@ export default function EventsScreen() {
           <Search size={20} color={Colors.light.textSecondary} />
           <TextInput
             style={styles.searchInput}
-            placeholder="Search events..."
+            placeholder="Search works..."
             value={searchQuery}
             onChangeText={setSearchQuery}
           />
@@ -124,10 +178,10 @@ export default function EventsScreen() {
             <View style={styles.section}>
               <View style={styles.sectionHeader}>
                 <FileText size={18} color="#78909C" />
-                <Text style={styles.sectionTitle}>Draft Events ({draftEvents.length})</Text>
+                <Text style={styles.sectionTitle}>Draft Works ({draftEvents.length})</Text>
               </View>
               {draftEvents.map(event => (
-                <EventCard key={event.id} event={event} getDisplayStatus={getEventDisplayStatus} />
+                <EventCard key={event.id} event={event} getDisplayStatus={getEventDisplayStatus} canEdit={canEditEvent} onActivate={handleActivateEvent} />
               ))}
             </View>
           )}
@@ -136,10 +190,10 @@ export default function EventsScreen() {
             <View style={styles.section}>
               <View style={styles.sectionHeader}>
                 <Play size={18} color="#2E7D32" />
-                <Text style={styles.sectionTitle}>Active Events ({activeEvents.length})</Text>
+                <Text style={styles.sectionTitle}>Active Works ({activeEvents.length})</Text>
               </View>
               {activeEvents.map(event => (
-                <EventCard key={event.id} event={event} getDisplayStatus={getEventDisplayStatus} />
+                <EventCard key={event.id} event={event} getDisplayStatus={getEventDisplayStatus} canEdit={canEditEvent} />
               ))}
             </View>
           )}
@@ -148,10 +202,10 @@ export default function EventsScreen() {
             <View style={styles.section}>
               <View style={styles.sectionHeader}>
                 <Pause size={18} color="#EF6C00" />
-                <Text style={styles.sectionTitle}>Paused Events ({pausedEvents.length})</Text>
+                <Text style={styles.sectionTitle}>Paused Works ({pausedEvents.length})</Text>
               </View>
               {pausedEvents.map(event => (
-                <EventCard key={event.id} event={event} getDisplayStatus={getEventDisplayStatus} />
+                <EventCard key={event.id} event={event} getDisplayStatus={getEventDisplayStatus} canEdit={canEditEvent} />
               ))}
             </View>
           )}
@@ -160,10 +214,10 @@ export default function EventsScreen() {
             <View style={styles.section}>
               <View style={styles.sectionHeader}>
                 <Calendar size={18} color="#7B1FA2" />
-                <Text style={styles.sectionTitle}>Upcoming Events ({upcomingEvents.length})</Text>
+                <Text style={styles.sectionTitle}>Upcoming Works ({upcomingEvents.length})</Text>
               </View>
               {upcomingEvents.map(event => (
-                <EventCard key={event.id} event={event} getDisplayStatus={getEventDisplayStatus} />
+                <EventCard key={event.id} event={event} getDisplayStatus={getEventDisplayStatus} canEdit={canEditEvent} />
               ))}
             </View>
           )}
@@ -172,10 +226,10 @@ export default function EventsScreen() {
             <View style={styles.section}>
               <View style={styles.sectionHeader}>
                 <CheckCircle size={18} color="#1565C0" />
-                <Text style={styles.sectionTitle}>Completed Events ({completedEvents.length})</Text>
+                <Text style={styles.sectionTitle}>Completed Works ({completedEvents.length})</Text>
               </View>
               {completedEvents.map(event => (
-                <EventCard key={event.id} event={event} getDisplayStatus={getEventDisplayStatus} />
+                <EventCard key={event.id} event={event} getDisplayStatus={getEventDisplayStatus} canEdit={canEditEvent} />
               ))}
             </View>
           )}
@@ -184,10 +238,10 @@ export default function EventsScreen() {
             <View style={styles.section}>
               <View style={styles.sectionHeader}>
                 <Calendar size={18} color="#546E7A" />
-                <Text style={styles.sectionTitle}>Past Due Events ({pastEvents.length})</Text>
+                <Text style={styles.sectionTitle}>Past Due Works ({pastEvents.length})</Text>
               </View>
               {pastEvents.map(event => (
-                <EventCard key={event.id} event={event} getDisplayStatus={getEventDisplayStatus} />
+                <EventCard key={event.id} event={event} getDisplayStatus={getEventDisplayStatus} canEdit={canEditEvent} />
               ))}
             </View>
           )}
@@ -196,10 +250,10 @@ export default function EventsScreen() {
             <View style={styles.section}>
               <View style={styles.sectionHeader}>
                 <XCircle size={18} color="#C62828" />
-                <Text style={styles.sectionTitle}>Cancelled Events ({cancelledEvents.length})</Text>
+                <Text style={styles.sectionTitle}>Cancelled Works ({cancelledEvents.length})</Text>
               </View>
               {cancelledEvents.map(event => (
-                <EventCard key={event.id} event={event} getDisplayStatus={getEventDisplayStatus} />
+                <EventCard key={event.id} event={event} getDisplayStatus={getEventDisplayStatus} canEdit={canEditEvent} />
               ))}
             </View>
           )}
@@ -207,11 +261,11 @@ export default function EventsScreen() {
           {filteredEvents.length === 0 && (
             <View style={styles.emptyState}>
               <Calendar size={64} color={Colors.light.textSecondary} />
-              <Text style={styles.emptyTitle}>No Events Found</Text>
+              <Text style={styles.emptyTitle}>No Works Found</Text>
               <Text style={styles.emptySubtitle}>
                 {canCreateEvents(employee?.role || 'SALES_STAFF')
-                  ? 'Tap the + button to create your first event'
-                  : 'Check back later for upcoming events'}
+                  ? 'Tap the + button to create your first work'
+                  : 'Check back later for upcoming works'}
               </Text>
             </View>
           )}
@@ -223,9 +277,15 @@ export default function EventsScreen() {
   );
 }
 
-function EventCard({ event, getDisplayStatus }: { event: Event; getDisplayStatus: (e: Event) => { status: EventStatus | 'upcoming' | 'past'; label: string } }) {
+function EventCard({ event, getDisplayStatus, canEdit, onActivate }: { 
+  event: Event; 
+  getDisplayStatus: (e: Event) => { status: EventStatus | 'upcoming' | 'past'; label: string };
+  canEdit: boolean;
+  onActivate?: (eventId: string) => void;
+}) {
   const router = useRouter();
   const { status, label } = getDisplayStatus(event);
+  const isDraft = status === 'draft';
   
   const statusColors: Record<string, { color: string; bg: string }> = {
     draft: { color: '#78909C', bg: '#ECEFF1' },
@@ -240,17 +300,43 @@ function EventCard({ event, getDisplayStatus }: { event: Event; getDisplayStatus
   const statusColor = statusColors[status]?.color || Colors.light.textSecondary;
   const statusBg = statusColors[status]?.bg || '#F5F5F5';
 
+  const handleEdit = (e: any) => {
+    e.stopPropagation();
+    router.push(`/event-detail?id=${event.id}&edit=true`);
+  };
+
+  const handleActivate = (e: any) => {
+    e.stopPropagation();
+    if (onActivate) {
+      onActivate(event.id);
+    }
+  };
+
   return (
     <TouchableOpacity 
-      style={[styles.eventCard, status === 'cancelled' && styles.eventCardCancelled]}
+      style={[styles.eventCard, status === 'cancelled' && styles.eventCardCancelled, isDraft && styles.eventCardDraft]}
       onPress={() => router.push(`/event-detail?id=${event.id}`)}
     >
+      {isDraft && (
+        <View style={styles.draftBanner}>
+          <FileText size={14} color="#78909C" />
+          <Text style={styles.draftBannerText}>Draft - Complete setup to activate</Text>
+        </View>
+      )}
+      
       <View style={styles.eventHeader}>
         <Text style={[styles.eventName, status === 'cancelled' && styles.eventNameCancelled]}>{event.name}</Text>
-        <View style={[styles.statusBadge, { backgroundColor: statusBg }]}>
-          <Text style={[styles.statusText, { color: statusColor }]}>
-            {label}
-          </Text>
+        <View style={styles.headerActions}>
+          {isDraft && canEdit && (
+            <TouchableOpacity onPress={handleEdit} style={styles.editButton}>
+              <Edit3 size={18} color={Colors.light.primary} />
+            </TouchableOpacity>
+          )}
+          <View style={[styles.statusBadge, { backgroundColor: statusBg }]}>
+            <Text style={[styles.statusText, { color: statusColor }]}>
+              {label}
+            </Text>
+          </View>
         </View>
       </View>
       
@@ -277,14 +363,35 @@ function EventCard({ event, getDisplayStatus }: { event: Event; getDisplayStatus
 
       <View style={styles.eventTargets}>
         <View style={styles.targetItem}>
-          <Text style={styles.targetLabel}>SIM Target</Text>
-          <Text style={styles.targetValue}>{event.targetSim}</Text>
+          <Text style={styles.targetLabel}>SIM Progress</Text>
+          <View style={styles.progressRow}>
+            <Text style={styles.targetValue}>{event.simsSold || 0}</Text>
+            <Text style={styles.targetDivider}>/</Text>
+            <Text style={styles.targetTotal}>{event.allocatedSim || event.targetSim}</Text>
+          </View>
         </View>
         <View style={styles.targetItem}>
-          <Text style={styles.targetLabel}>FTTH Target</Text>
-          <Text style={styles.targetValue}>{event.targetFtth}</Text>
+          <Text style={styles.targetLabel}>FTTH Progress</Text>
+          <View style={styles.progressRow}>
+            <Text style={styles.targetValue}>{event.ftthSold || 0}</Text>
+            <Text style={styles.targetDivider}>/</Text>
+            <Text style={styles.targetTotal}>{event.allocatedFtth || event.targetFtth}</Text>
+          </View>
         </View>
       </View>
+
+      {isDraft && canEdit && (
+        <View style={styles.quickActions}>
+          <TouchableOpacity style={styles.quickActionButton} onPress={handleEdit}>
+            <Edit3 size={16} color={Colors.light.primary} />
+            <Text style={styles.quickActionText}>Edit Details</Text>
+          </TouchableOpacity>
+          <TouchableOpacity style={styles.quickActionButtonPrimary} onPress={handleActivate}>
+            <Zap size={16} color="#fff" />
+            <Text style={styles.quickActionTextPrimary}>Activate Work</Text>
+          </TouchableOpacity>
+        </View>
+      )}
     </TouchableOpacity>
   );
 }
@@ -349,6 +456,78 @@ const styles = StyleSheet.create({
   },
   eventCardCancelled: {
     opacity: 0.7,
+  },
+  eventCardDraft: {
+    borderWidth: 2,
+    borderColor: '#CFD8DC',
+    borderStyle: 'dashed',
+  },
+  draftBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#ECEFF1',
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 8,
+    marginBottom: 12,
+    gap: 8,
+  },
+  draftBannerText: {
+    fontSize: 12,
+    color: '#78909C',
+    fontWeight: '500' as const,
+  },
+  headerActions: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  editButton: {
+    padding: 6,
+    borderRadius: 6,
+    backgroundColor: Colors.light.lightBlue,
+  },
+  quickActions: {
+    flexDirection: 'row',
+    gap: 12,
+    marginTop: 16,
+    paddingTop: 16,
+    borderTopWidth: 1,
+    borderTopColor: '#E0E0E0',
+  },
+  quickActionButton: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    paddingVertical: 12,
+    paddingHorizontal: 16,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: Colors.light.primary,
+    backgroundColor: Colors.light.background,
+  },
+  quickActionText: {
+    fontSize: 14,
+    fontWeight: '600' as const,
+    color: Colors.light.primary,
+  },
+  quickActionButtonPrimary: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    paddingVertical: 12,
+    paddingHorizontal: 16,
+    borderRadius: 8,
+    backgroundColor: Colors.light.primary,
+  },
+  quickActionTextPrimary: {
+    fontSize: 14,
+    fontWeight: '600' as const,
+    color: '#fff',
   },
   eventHeader: {
     flexDirection: 'row',
@@ -417,7 +596,20 @@ const styles = StyleSheet.create({
   targetValue: {
     fontSize: 20,
     fontWeight: 'bold' as const,
-    color: Colors.light.text,
+    color: Colors.light.primary,
+  },
+  progressRow: {
+    flexDirection: 'row',
+    alignItems: 'baseline',
+  },
+  targetDivider: {
+    fontSize: 16,
+    color: Colors.light.textSecondary,
+    marginHorizontal: 2,
+  },
+  targetTotal: {
+    fontSize: 14,
+    color: Colors.light.textSecondary,
   },
   emptyState: {
     alignItems: 'center',

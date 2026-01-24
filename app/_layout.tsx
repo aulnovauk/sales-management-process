@@ -34,6 +34,7 @@ function LoadingScreen() {
 function RootLayoutNav() {
   return (
     <Stack screenOptions={{ headerBackTitle: "Back" }}>
+      <Stack.Screen name="index" options={{ headerShown: false }} />
       <Stack.Screen name="login" options={{ headerShown: false }} />
       <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
       <Stack.Screen name="event-detail" options={{ headerShown: true }} />
@@ -45,19 +46,9 @@ function RootLayoutNav() {
 }
 
 export default function RootLayout() {
-  const [isReady, setIsReady] = React.useState(false);
-
   useEffect(() => {
-    const timer = setTimeout(() => {
-      setIsReady(true);
-      SplashScreen.hideAsync();
-    }, 1500);
-    return () => clearTimeout(timer);
+    SplashScreen.hideAsync();
   }, []);
-
-  if (!isReady) {
-    return <LoadingScreen />;
-  }
 
   return (
     <trpc.Provider client={trpcClient} queryClient={queryClient}>

@@ -1,7 +1,34 @@
 import { z } from "zod";
 import { eq, and, desc, gte, lte, sql } from "drizzle-orm";
 import { createTRPCRouter, publicProcedure } from "../create-context";
-import { db, events, employees, auditLogs, eventAssignments, eventSalesEntries, eventSubtasks } from "@/backend/db";
+import { db, events, employees, auditLogs, eventAssignments, eventSalesEntries, eventSubtasks, employeeMaster, resources, resourceAllocations } from "@/backend/db";
+
+async function autoCompleteExpiredEvents(eventsList: typeof events.$inferSelect[]) {
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  
+  const expiredEventIds: string[] = [];
+  for (const event of eventsList) {
+    if (event.status === 'active' && event.endDate) {
+      const endDate = new Date(event.endDate);
+      endDate.setHours(23, 59, 59, 999);
+      if (endDate < today) {
+        expiredEventIds.push(event.id);
+      }
+    }
+  }
+  
+  if (expiredEventIds.length > 0) {
+    await Promise.all(expiredEventIds.map(id =>
+      db.update(events)
+        .set({ status: 'completed', updatedAt: new Date() })
+        .where(eq(events.id, id))
+    ));
+    console.log(`Auto-completed ${expiredEventIds.length} expired works`);
+  }
+  
+  return expiredEventIds;
+}
 
 export const eventsRouter = createTRPCRouter({
   getAll: publicProcedure
@@ -14,7 +41,31 @@ export const eventsRouter = createTRPCRouter({
     .query(async ({ input }) => {
       console.log("Fetching all events", input);
       const results = await db.select().from(events).orderBy(desc(events.createdAt));
-      return results;
+      
+      // Get all event assignments to calculate sales progress
+      const allAssignments = await db.select().from(eventAssignments);
+      
+      // Auto-complete expired events
+      const expiredEventIds = await autoCompleteExpiredEvents(results);
+      
+      // Add sales progress to each event (with corrected status for expired ones)
+      const eventsWithProgress = results.map(event => {
+        const eventAssigns = allAssignments.filter(a => a.eventId === event.id);
+        const simSold = eventAssigns.reduce((sum, a) => sum + a.simSold, 0);
+        const ftthSold = eventAssigns.reduce((sum, a) => sum + a.ftthSold, 0);
+        
+        // Apply corrected status for expired events in this response
+        const correctedStatus = expiredEventIds.includes(event.id) ? 'completed' : event.status;
+        
+        return {
+          ...event,
+          status: correctedStatus,
+          simSold,
+          ftthSold,
+        };
+      });
+      
+      return eventsWithProgress;
     }),
 
   getById: publicProcedure
@@ -50,10 +101,34 @@ export const eventsRouter = createTRPCRouter({
       let assignedToId = input.assignedTo;
       
       if (input.assignedToStaffId && !assignedToId) {
-        const employeeByStaffId = await db.select().from(employees)
-          .where(eq(employees.employeeNo, input.assignedToStaffId));
-        if (employeeByStaffId[0]) {
-          assignedToId = employeeByStaffId[0].id;
+        const masterRecord = await db.select().from(employeeMaster)
+          .where(eq(employeeMaster.purseId, input.assignedToStaffId));
+        if (masterRecord[0]?.linkedEmployeeId) {
+          assignedToId = masterRecord[0].linkedEmployeeId;
+        }
+      }
+      
+      const circleResources = await db.select().from(resources)
+        .where(eq(resources.circle, input.circle));
+      
+      const simResource = circleResources.find(r => r.type === 'SIM');
+      const ftthResource = circleResources.find(r => r.type === 'FTTH');
+      
+      if (input.allocatedSim > 0) {
+        if (!simResource) {
+          throw new Error(`No SIM inventory exists for circle ${input.circle}. Please set up circle resources first.`);
+        }
+        if (simResource.remaining < input.allocatedSim) {
+          throw new Error(`Insufficient SIM resources. Available: ${simResource.remaining}, Requested: ${input.allocatedSim}`);
+        }
+      }
+      
+      if (input.allocatedFtth > 0) {
+        if (!ftthResource) {
+          throw new Error(`No FTTH inventory exists for circle ${input.circle}. Please set up circle resources first.`);
+        }
+        if (ftthResource.remaining < input.allocatedFtth) {
+          throw new Error(`Insufficient FTTH resources. Available: ${ftthResource.remaining}, Requested: ${input.allocatedFtth}`);
         }
       }
       
@@ -74,6 +149,40 @@ export const eventsRouter = createTRPCRouter({
         assignedTo: assignedToId,
         createdBy: input.createdBy,
       }).returning();
+      
+      if (input.allocatedSim > 0 && simResource) {
+        await db.update(resources)
+          .set({
+            allocated: simResource.allocated + input.allocatedSim,
+            remaining: simResource.remaining - input.allocatedSim,
+            updatedAt: new Date(),
+          })
+          .where(eq(resources.id, simResource.id));
+        
+        await db.insert(resourceAllocations).values({
+          resourceId: simResource.id,
+          eventId: result[0].id,
+          quantity: input.allocatedSim,
+          allocatedBy: input.createdBy,
+        });
+      }
+      
+      if (input.allocatedFtth > 0 && ftthResource) {
+        await db.update(resources)
+          .set({
+            allocated: ftthResource.allocated + input.allocatedFtth,
+            remaining: ftthResource.remaining - input.allocatedFtth,
+            updatedAt: new Date(),
+          })
+          .where(eq(resources.id, ftthResource.id));
+        
+        await db.insert(resourceAllocations).values({
+          resourceId: ftthResource.id,
+          eventId: result[0].id,
+          quantity: input.allocatedFtth,
+          allocatedBy: input.createdBy,
+        });
+      }
       
       if (assignedToId) {
         const existingAssignment = await db.select().from(eventAssignments)
@@ -132,6 +241,84 @@ export const eventsRouter = createTRPCRouter({
       console.log("Updating event:", input.id);
       const { id, updatedBy, startDate, endDate, ...updateData } = input;
       
+      const existingEvent = await db.select().from(events).where(eq(events.id, id));
+      if (!existingEvent[0]) throw new Error("Event not found");
+      
+      if (input.allocatedSim !== undefined || input.allocatedFtth !== undefined) {
+        const assignments = await db.select().from(eventAssignments)
+          .where(eq(eventAssignments.eventId, id));
+        
+        const totalSimDistributed = assignments.reduce((sum, a) => sum + a.simTarget, 0);
+        const totalFtthDistributed = assignments.reduce((sum, a) => sum + a.ftthTarget, 0);
+        
+        if (input.allocatedSim !== undefined && input.allocatedSim < totalSimDistributed) {
+          throw new Error(`Cannot reduce SIM allocation below distributed amount (${totalSimDistributed}). Reduce team targets first.`);
+        }
+        
+        if (input.allocatedFtth !== undefined && input.allocatedFtth < totalFtthDistributed) {
+          throw new Error(`Cannot reduce FTTH allocation below distributed amount (${totalFtthDistributed}). Reduce team targets first.`);
+        }
+        
+        const circleResources = await db.select().from(resources)
+          .where(eq(resources.circle, existingEvent[0].circle));
+        
+        if (input.allocatedSim !== undefined && input.allocatedSim > existingEvent[0].allocatedSim) {
+          const simResource = circleResources.find(r => r.type === 'SIM');
+          const additionalNeeded = input.allocatedSim - existingEvent[0].allocatedSim;
+          if (!simResource || simResource.remaining < additionalNeeded) {
+            throw new Error(`Insufficient SIM resources. Available: ${simResource?.remaining || 0}, Additional needed: ${additionalNeeded}`);
+          }
+          
+          await db.update(resources)
+            .set({
+              allocated: simResource.allocated + additionalNeeded,
+              remaining: simResource.remaining - additionalNeeded,
+              updatedAt: new Date(),
+            })
+            .where(eq(resources.id, simResource.id));
+        } else if (input.allocatedSim !== undefined && input.allocatedSim < existingEvent[0].allocatedSim) {
+          const simResource = circleResources.find(r => r.type === 'SIM');
+          const returned = existingEvent[0].allocatedSim - input.allocatedSim;
+          if (simResource) {
+            await db.update(resources)
+              .set({
+                allocated: simResource.allocated - returned,
+                remaining: simResource.remaining + returned,
+                updatedAt: new Date(),
+              })
+              .where(eq(resources.id, simResource.id));
+          }
+        }
+        
+        if (input.allocatedFtth !== undefined && input.allocatedFtth > existingEvent[0].allocatedFtth) {
+          const ftthResource = circleResources.find(r => r.type === 'FTTH');
+          const additionalNeeded = input.allocatedFtth - existingEvent[0].allocatedFtth;
+          if (!ftthResource || ftthResource.remaining < additionalNeeded) {
+            throw new Error(`Insufficient FTTH resources. Available: ${ftthResource?.remaining || 0}, Additional needed: ${additionalNeeded}`);
+          }
+          
+          await db.update(resources)
+            .set({
+              allocated: ftthResource.allocated + additionalNeeded,
+              remaining: ftthResource.remaining - additionalNeeded,
+              updatedAt: new Date(),
+            })
+            .where(eq(resources.id, ftthResource.id));
+        } else if (input.allocatedFtth !== undefined && input.allocatedFtth < existingEvent[0].allocatedFtth) {
+          const ftthResource = circleResources.find(r => r.type === 'FTTH');
+          const returned = existingEvent[0].allocatedFtth - input.allocatedFtth;
+          if (ftthResource) {
+            await db.update(resources)
+              .set({
+                allocated: ftthResource.allocated - returned,
+                remaining: ftthResource.remaining + returned,
+                updatedAt: new Date(),
+              })
+              .where(eq(resources.id, ftthResource.id));
+          }
+        }
+      }
+      
       const updateValues: Record<string, unknown> = { ...updateData, updatedAt: new Date() };
       if (startDate) updateValues.startDate = new Date(startDate);
       if (endDate) updateValues.endDate = new Date(endDate);
@@ -183,12 +370,26 @@ export const eventsRouter = createTRPCRouter({
       const result = await db.select().from(events)
         .where(eq(events.circle, input.circle))
         .orderBy(desc(events.createdAt));
-      return result;
+      
+      // Auto-complete expired events
+      const expiredIds = await autoCompleteExpiredEvents(result);
+      
+      return result.map(e => ({
+        ...e,
+        status: expiredIds.includes(e.id) ? 'completed' : e.status
+      }));
     }),
 
   getActiveEvents: publicProcedure
     .query(async () => {
       console.log("Fetching active events");
+      
+      // First auto-complete any expired events in the database
+      const allActive = await db.select().from(events)
+        .where(eq(events.status, 'active'));
+      await autoCompleteExpiredEvents(allActive);
+      
+      // Now fetch truly active events
       const now = new Date();
       const result = await db.select().from(events)
         .where(and(
@@ -203,6 +404,12 @@ export const eventsRouter = createTRPCRouter({
   getUpcomingEvents: publicProcedure
     .query(async () => {
       console.log("Fetching upcoming events");
+      
+      // First auto-complete any expired events
+      const allActive = await db.select().from(events)
+        .where(eq(events.status, 'active'));
+      await autoCompleteExpiredEvents(allActive);
+      
       const now = new Date();
       const result = await db.select().from(events)
         .where(and(
@@ -285,6 +492,14 @@ export const eventsRouter = createTRPCRouter({
           .where(sql`${employees.id} IN ${allEmployeeIds}`);
       }
       
+      const masterRecords = await db.select().from(employeeMaster);
+      const purseIdMap = new Map<string, string>();
+      masterRecords.forEach(m => {
+        if (m.linkedEmployeeId) {
+          purseIdMap.set(m.linkedEmployeeId, m.purseId);
+        }
+      });
+      
       const teamWithAllocations = assignments.map(assignment => {
         const employee = teamMembers.find(e => e.id === assignment.employeeId);
         const memberSales = salesEntries.filter(s => s.employeeId === assignment.employeeId);
@@ -293,17 +508,20 @@ export const eventsRouter = createTRPCRouter({
         
         return {
           ...assignment,
-          employee,
+          employee: employee ? { ...employee, purseId: purseIdMap.get(employee.id) || null } : undefined,
           actualSimSold: totalSimsSold,
           actualFtthSold: totalFtthSold,
           salesEntries: memberSales,
         };
       });
       
-      const subtasksWithAssignees = subtasks.map(subtask => ({
-        ...subtask,
-        assignedEmployee: subtask.assignedTo ? teamMembers.find(e => e.id === subtask.assignedTo) : undefined,
-      }));
+      const subtasksWithAssignees = subtasks.map(subtask => {
+        const emp = subtask.assignedTo ? teamMembers.find(e => e.id === subtask.assignedTo) : undefined;
+        return {
+          ...subtask,
+          assignedEmployee: emp ? { ...emp, purseId: purseIdMap.get(emp.id) || null } : undefined,
+        };
+      });
       
       const totalSimsSold = salesEntries.reduce((sum, s) => sum + s.simsSold, 0);
       const totalFtthSold = salesEntries.reduce((sum, s) => sum + s.ftthSold, 0);
@@ -315,11 +533,14 @@ export const eventsRouter = createTRPCRouter({
         inProgress: subtasks.filter(s => s.status === 'in_progress').length,
       };
       
-      let assignedToEmployee = undefined;
+      let assignedToEmployee: any = undefined;
       if (eventResult[0].assignedTo) {
         const assignee = await db.select().from(employees)
           .where(eq(employees.id, eventResult[0].assignedTo));
-        assignedToEmployee = assignee[0];
+        if (assignee[0]) {
+          const managerPurseId = purseIdMap.get(assignee[0].id) || null;
+          assignedToEmployee = { ...assignee[0], purseId: managerPurseId };
+        }
       }
       
       const result = {
@@ -345,6 +566,42 @@ export const eventsRouter = createTRPCRouter({
       }
     }),
 
+  getEventResourceStatus: publicProcedure
+    .input(z.object({ eventId: z.string().uuid() }))
+    .query(async ({ input }) => {
+      const event = await db.select().from(events).where(eq(events.id, input.eventId));
+      if (!event[0]) throw new Error("Event not found");
+      
+      const assignments = await db.select().from(eventAssignments)
+        .where(eq(eventAssignments.eventId, input.eventId));
+      
+      const totalSimDistributed = assignments.reduce((sum, a) => sum + a.simTarget, 0);
+      const totalFtthDistributed = assignments.reduce((sum, a) => sum + a.ftthTarget, 0);
+      const totalSimSold = assignments.reduce((sum, a) => sum + a.simSold, 0);
+      const totalFtthSold = assignments.reduce((sum, a) => sum + a.ftthSold, 0);
+      
+      return {
+        allocated: {
+          sim: event[0].allocatedSim,
+          ftth: event[0].allocatedFtth,
+        },
+        distributed: {
+          sim: totalSimDistributed,
+          ftth: totalFtthDistributed,
+        },
+        sold: {
+          sim: totalSimSold,
+          ftth: totalFtthSold,
+        },
+        remaining: {
+          simToDistribute: event[0].allocatedSim - totalSimDistributed,
+          ftthToDistribute: event[0].allocatedFtth - totalFtthDistributed,
+          simUnsold: totalSimDistributed - totalSimSold,
+          ftthUnsold: totalFtthDistributed - totalFtthSold,
+        },
+      };
+    }),
+
   assignTeamMember: publicProcedure
     .input(z.object({
       eventId: z.string().uuid(),
@@ -356,20 +613,39 @@ export const eventsRouter = createTRPCRouter({
     .mutation(async ({ input }) => {
       console.log("Assigning team member with targets:", input);
       
-      const existing = await db.select().from(eventAssignments)
-        .where(and(
-          eq(eventAssignments.eventId, input.eventId),
-          eq(eventAssignments.employeeId, input.employeeId)
-        ));
+      const event = await db.select().from(events).where(eq(events.id, input.eventId));
+      if (!event[0]) throw new Error("Event not found");
       
-      if (existing[0]) {
+      const allAssignments = await db.select().from(eventAssignments)
+        .where(eq(eventAssignments.eventId, input.eventId));
+      
+      const existing = allAssignments.find(a => a.employeeId === input.employeeId);
+      
+      const otherAssignments = allAssignments.filter(a => a.employeeId !== input.employeeId);
+      const currentSimDistributed = otherAssignments.reduce((sum, a) => sum + a.simTarget, 0);
+      const currentFtthDistributed = otherAssignments.reduce((sum, a) => sum + a.ftthTarget, 0);
+      
+      const newTotalSim = currentSimDistributed + input.simTarget;
+      const newTotalFtth = currentFtthDistributed + input.ftthTarget;
+      
+      if (newTotalSim > event[0].allocatedSim) {
+        const available = event[0].allocatedSim - currentSimDistributed;
+        throw new Error(`Cannot assign ${input.simTarget} SIMs. Only ${available} SIMs available for distribution.`);
+      }
+      
+      if (newTotalFtth > event[0].allocatedFtth) {
+        const available = event[0].allocatedFtth - currentFtthDistributed;
+        throw new Error(`Cannot assign ${input.ftthTarget} FTTH. Only ${available} FTTH available for distribution.`);
+      }
+      
+      if (existing) {
         await db.update(eventAssignments)
           .set({
             simTarget: input.simTarget,
             ftthTarget: input.ftthTarget,
             updatedAt: new Date(),
           })
-          .where(eq(eventAssignments.id, existing[0].id));
+          .where(eq(eventAssignments.id, existing.id));
       } else {
         await db.insert(eventAssignments).values({
           eventId: input.eventId,
@@ -379,14 +655,11 @@ export const eventsRouter = createTRPCRouter({
           assignedBy: input.assignedBy,
         });
         
-        const event = await db.select().from(events).where(eq(events.id, input.eventId));
-        if (event[0]) {
-          const currentTeam = (event[0].assignedTeam || []) as string[];
-          if (!currentTeam.includes(input.employeeId)) {
-            await db.update(events)
-              .set({ assignedTeam: [...currentTeam, input.employeeId], updatedAt: new Date() })
-              .where(eq(events.id, input.eventId));
-          }
+        const currentTeam = (event[0].assignedTeam || []) as string[];
+        if (!currentTeam.includes(input.employeeId)) {
+          await db.update(events)
+            .set({ assignedTeam: [...currentTeam, input.employeeId], updatedAt: new Date() })
+            .where(eq(events.id, input.eventId));
         }
       }
 
@@ -409,6 +682,16 @@ export const eventsRouter = createTRPCRouter({
     }))
     .mutation(async ({ input }) => {
       console.log("Removing team member:", input);
+      
+      const assignment = await db.select().from(eventAssignments)
+        .where(and(
+          eq(eventAssignments.eventId, input.eventId),
+          eq(eventAssignments.employeeId, input.employeeId)
+        ));
+      
+      if (assignment[0] && (assignment[0].simSold > 0 || assignment[0].ftthSold > 0)) {
+        throw new Error(`Cannot remove team member with recorded sales. SIM sold: ${assignment[0].simSold}, FTTH sold: ${assignment[0].ftthSold}. Please reassign sales first.`);
+      }
       
       await db.delete(eventAssignments)
         .where(and(
@@ -458,6 +741,36 @@ export const eventsRouter = createTRPCRouter({
     .mutation(async ({ input }) => {
       console.log("Submitting event sales:", input);
       
+      const event = await db.select().from(events).where(eq(events.id, input.eventId));
+      if (!event[0]) throw new Error("Event not found");
+      
+      if (event[0].status === 'completed' || event[0].status === 'cancelled') {
+        throw new Error(`Cannot submit sales for ${event[0].status} event`);
+      }
+      
+      const assignment = await db.select().from(eventAssignments)
+        .where(and(
+          eq(eventAssignments.eventId, input.eventId),
+          eq(eventAssignments.employeeId, input.employeeId)
+        ));
+      
+      if (!assignment[0]) {
+        throw new Error("You are not assigned to this event. Please contact the event manager.");
+      }
+      
+      const newTotalSim = assignment[0].simSold + input.simsSold;
+      const newTotalFtth = assignment[0].ftthSold + input.ftthSold;
+      
+      if (newTotalSim > assignment[0].simTarget) {
+        const remaining = assignment[0].simTarget - assignment[0].simSold;
+        throw new Error(`Cannot sell ${input.simsSold} SIMs. Only ${remaining} remaining in your target. Contact manager to increase target.`);
+      }
+      
+      if (newTotalFtth > assignment[0].ftthTarget) {
+        const remaining = assignment[0].ftthTarget - assignment[0].ftthSold;
+        throw new Error(`Cannot sell ${input.ftthSold} FTTH. Only ${remaining} remaining in your target. Contact manager to increase target.`);
+      }
+      
       const result = await db.insert(eventSalesEntries).values({
         eventId: input.eventId,
         employeeId: input.employeeId,
@@ -471,21 +784,45 @@ export const eventsRouter = createTRPCRouter({
         gpsLongitude: input.gpsLongitude,
         remarks: input.remarks,
       }).returning();
-
-      const assignment = await db.select().from(eventAssignments)
-        .where(and(
-          eq(eventAssignments.eventId, input.eventId),
-          eq(eventAssignments.employeeId, input.employeeId)
-        ));
       
-      if (assignment[0]) {
-        await db.update(eventAssignments)
-          .set({
-            simSold: assignment[0].simSold + input.simsSold,
-            ftthSold: assignment[0].ftthSold + input.ftthSold,
-            updatedAt: new Date(),
-          })
-          .where(eq(eventAssignments.id, assignment[0].id));
+      await db.update(eventAssignments)
+        .set({
+          simSold: newTotalSim,
+          ftthSold: newTotalFtth,
+          updatedAt: new Date(),
+        })
+        .where(eq(eventAssignments.id, assignment[0].id));
+      
+      if (input.simsSold > 0) {
+        const simResource = await db.select().from(resources)
+          .where(and(
+            eq(resources.circle, event[0].circle),
+            eq(resources.type, 'SIM')
+          ));
+        if (simResource[0]) {
+          await db.update(resources)
+            .set({
+              used: simResource[0].used + input.simsSold,
+              updatedAt: new Date(),
+            })
+            .where(eq(resources.id, simResource[0].id));
+        }
+      }
+      
+      if (input.ftthSold > 0) {
+        const ftthResource = await db.select().from(resources)
+          .where(and(
+            eq(resources.circle, event[0].circle),
+            eq(resources.type, 'FTTH')
+          ));
+        if (ftthResource[0]) {
+          await db.update(resources)
+            .set({
+              used: ftthResource[0].used + input.ftthSold,
+              updatedAt: new Date(),
+            })
+            .where(eq(resources.id, ftthResource[0].id));
+        }
       }
 
       await db.insert(auditLogs).values({
@@ -537,28 +874,57 @@ export const eventsRouter = createTRPCRouter({
     .input(z.object({ 
       circle: z.enum(['ANDAMAN_NICOBAR', 'ANDHRA_PRADESH', 'ASSAM', 'BIHAR', 'CHHATTISGARH', 'GUJARAT', 'HARYANA', 'HIMACHAL_PRADESH', 'JAMMU_KASHMIR', 'JHARKHAND', 'KARNATAKA', 'KERALA', 'MADHYA_PRADESH', 'MAHARASHTRA', 'NORTH_EAST_I', 'NORTH_EAST_II', 'ODISHA', 'PUNJAB', 'RAJASTHAN', 'TAMIL_NADU', 'TELANGANA', 'UTTARAKHAND', 'UTTAR_PRADESH_EAST', 'UTTAR_PRADESH_WEST', 'WEST_BENGAL']),
       eventId: z.string().uuid().optional(),
+      managerPurseId: z.string().optional(),
     }))
     .query(async ({ input }) => {
-      console.log("Fetching available team members for circle:", input.circle);
+      console.log("Fetching available team members for circle:", input.circle, "manager:", input.managerPurseId);
       
-      const circleEmployees = await db.select().from(employees)
+      const masterRecords = await db.select().from(employeeMaster);
+      const purseIdMap = new Map<string, string>();
+      const linkedEmployeeMap = new Map<string, string>();
+      masterRecords.forEach(m => {
+        if (m.linkedEmployeeId) {
+          purseIdMap.set(m.linkedEmployeeId, m.purseId);
+          linkedEmployeeMap.set(m.purseId, m.linkedEmployeeId);
+        }
+      });
+      
+      let directReportPurseIds: string[] = [];
+      if (input.managerPurseId) {
+        directReportPurseIds = masterRecords
+          .filter(m => m.reportingPurseId === input.managerPurseId)
+          .map(m => m.purseId);
+        console.log("Direct reports of", input.managerPurseId, ":", directReportPurseIds.length);
+      }
+      
+      const directReportEmployeeIds = directReportPurseIds
+        .map(pid => linkedEmployeeMap.get(pid))
+        .filter((id): id is string => id !== undefined);
+      
+      let circleEmployees = await db.select().from(employees)
         .where(and(
           eq(employees.circle, input.circle),
           eq(employees.isActive, true)
         ));
       
+      if (input.managerPurseId && directReportEmployeeIds.length > 0) {
+        circleEmployees = circleEmployees.filter(emp => directReportEmployeeIds.includes(emp.id));
+      } else if (input.managerPurseId && directReportEmployeeIds.length === 0) {
+        circleEmployees = [];
+      }
+      
+      let assignedIds: string[] = [];
       if (input.eventId) {
         const assignments = await db.select().from(eventAssignments)
           .where(eq(eventAssignments.eventId, input.eventId));
-        const assignedIds = assignments.map(a => a.employeeId);
-        
-        return circleEmployees.map(emp => ({
-          ...emp,
-          isAssigned: assignedIds.includes(emp.id),
-        }));
+        assignedIds = assignments.map(a => a.employeeId);
       }
       
-      return circleEmployees.map(emp => ({ ...emp, isAssigned: false }));
+      return circleEmployees.map(emp => ({
+        ...emp,
+        purseId: purseIdMap.get(emp.id) || null,
+        isAssigned: assignedIds.includes(emp.id),
+      }));
     }),
 
   updateEventStatus: publicProcedure
@@ -595,6 +961,8 @@ export const eventsRouter = createTRPCRouter({
       staffId: z.string().optional(),
       priority: z.enum(['low', 'medium', 'high', 'urgent']).default('medium'),
       dueDate: z.string().optional(),
+      simAllocated: z.number().int().min(0).default(0),
+      ftthAllocated: z.number().int().min(0).default(0),
       createdBy: z.string().uuid(),
     }))
     .mutation(async ({ input }) => {
@@ -603,10 +971,10 @@ export const eventsRouter = createTRPCRouter({
       let assignedEmployeeId = input.assignedTo;
       
       if (input.staffId && !assignedEmployeeId) {
-        const employeeByStaffId = await db.select().from(employees)
-          .where(eq(employees.employeeNo, input.staffId));
-        if (employeeByStaffId[0]) {
-          assignedEmployeeId = employeeByStaffId[0].id;
+        const masterRecord = await db.select().from(employeeMaster)
+          .where(eq(employeeMaster.purseId, input.staffId));
+        if (masterRecord[0]?.linkedEmployeeId) {
+          assignedEmployeeId = masterRecord[0].linkedEmployeeId;
         }
       }
       
@@ -653,6 +1021,8 @@ export const eventsRouter = createTRPCRouter({
         assignedTo: assignedEmployeeId,
         priority: input.priority,
         dueDate: input.dueDate ? new Date(input.dueDate) : undefined,
+        simAllocated: input.simAllocated,
+        ftthAllocated: input.ftthAllocated,
         createdBy: input.createdBy,
       }).returning();
 
@@ -676,6 +1046,10 @@ export const eventsRouter = createTRPCRouter({
       status: z.enum(['pending', 'in_progress', 'completed', 'cancelled']).optional(),
       priority: z.enum(['low', 'medium', 'high', 'urgent']).optional(),
       dueDate: z.string().nullable().optional(),
+      simAllocated: z.number().int().min(0).optional(),
+      ftthAllocated: z.number().int().min(0).optional(),
+      simSold: z.number().int().min(0).optional(),
+      ftthSold: z.number().int().min(0).optional(),
       updatedBy: z.string().uuid(),
     }))
     .mutation(async ({ input }) => {
@@ -747,6 +1121,39 @@ export const eventsRouter = createTRPCRouter({
     .mutation(async ({ input }) => {
       console.log("Updating team member targets:", input);
       
+      const event = await db.select().from(events).where(eq(events.id, input.eventId));
+      if (!event[0]) throw new Error("Event not found");
+      
+      const allAssignments = await db.select().from(eventAssignments)
+        .where(eq(eventAssignments.eventId, input.eventId));
+      
+      const currentAssignment = allAssignments.find(a => a.employeeId === input.employeeId);
+      if (!currentAssignment) throw new Error("Team member assignment not found");
+      
+      if (input.simTarget < currentAssignment.simSold) {
+        throw new Error(`Cannot set SIM target below already sold amount (${currentAssignment.simSold})`);
+      }
+      if (input.ftthTarget < currentAssignment.ftthSold) {
+        throw new Error(`Cannot set FTTH target below already sold amount (${currentAssignment.ftthSold})`);
+      }
+      
+      const otherAssignments = allAssignments.filter(a => a.employeeId !== input.employeeId);
+      const currentSimDistributed = otherAssignments.reduce((sum, a) => sum + a.simTarget, 0);
+      const currentFtthDistributed = otherAssignments.reduce((sum, a) => sum + a.ftthTarget, 0);
+      
+      const newTotalSim = currentSimDistributed + input.simTarget;
+      const newTotalFtth = currentFtthDistributed + input.ftthTarget;
+      
+      if (newTotalSim > event[0].allocatedSim) {
+        const available = event[0].allocatedSim - currentSimDistributed;
+        throw new Error(`Cannot assign ${input.simTarget} SIMs. Only ${available} SIMs available for distribution.`);
+      }
+      
+      if (newTotalFtth > event[0].allocatedFtth) {
+        const available = event[0].allocatedFtth - currentFtthDistributed;
+        throw new Error(`Cannot assign ${input.ftthTarget} FTTH. Only ${available} FTTH available for distribution.`);
+      }
+      
       const result = await db.update(eventAssignments)
         .set({
           simTarget: input.simTarget,
@@ -768,5 +1175,127 @@ export const eventsRouter = createTRPCRouter({
       });
 
       return result[0];
+    }),
+
+  getCircleResourceDashboard: publicProcedure
+    .input(z.object({ 
+      circle: z.enum(['ANDAMAN_NICOBAR', 'ANDHRA_PRADESH', 'ASSAM', 'BIHAR', 'CHHATTISGARH', 'GUJARAT', 'HARYANA', 'HIMACHAL_PRADESH', 'JAMMU_KASHMIR', 'JHARKHAND', 'KARNATAKA', 'KERALA', 'MADHYA_PRADESH', 'MAHARASHTRA', 'NORTH_EAST_I', 'NORTH_EAST_II', 'ODISHA', 'PUNJAB', 'RAJASTHAN', 'TAMIL_NADU', 'TELANGANA', 'UTTARAKHAND', 'UTTAR_PRADESH_EAST', 'UTTAR_PRADESH_WEST', 'WEST_BENGAL'])
+    }))
+    .query(async ({ input }) => {
+      console.log("Fetching circle resource dashboard:", input.circle);
+      
+      const circleResources = await db.select().from(resources)
+        .where(eq(resources.circle, input.circle));
+      
+      const simResource = circleResources.find(r => r.type === 'SIM');
+      const ftthResource = circleResources.find(r => r.type === 'FTTH');
+      
+      const circleEvents = await db.select().from(events)
+        .where(eq(events.circle, input.circle));
+      
+      const eventIds = circleEvents.map(e => e.id);
+      let allAssignments: any[] = [];
+      if (eventIds.length > 0) {
+        allAssignments = await db.select().from(eventAssignments)
+          .where(sql`${eventAssignments.eventId} IN ${eventIds}`);
+      }
+      
+      const eventSummaries = circleEvents.map(event => {
+        const eventAssigns = allAssignments.filter(a => a.eventId === event.id);
+        const simDistributed = eventAssigns.reduce((sum, a) => sum + a.simTarget, 0);
+        const ftthDistributed = eventAssigns.reduce((sum, a) => sum + a.ftthTarget, 0);
+        const simSold = eventAssigns.reduce((sum, a) => sum + a.simSold, 0);
+        const ftthSold = eventAssigns.reduce((sum, a) => sum + a.ftthSold, 0);
+        
+        return {
+          id: event.id,
+          name: event.name,
+          status: event.status,
+          startDate: event.startDate,
+          endDate: event.endDate,
+          resources: {
+            sim: { allocated: event.allocatedSim, distributed: simDistributed, sold: simSold, remaining: event.allocatedSim - simSold },
+            ftth: { allocated: event.allocatedFtth, distributed: ftthDistributed, sold: ftthSold, remaining: event.allocatedFtth - ftthSold },
+          },
+        };
+      });
+      
+      return {
+        circle: input.circle,
+        inventory: {
+          sim: simResource ? { total: simResource.total, allocated: simResource.allocated, used: simResource.used, remaining: simResource.remaining } : null,
+          ftth: ftthResource ? { total: ftthResource.total, allocated: ftthResource.allocated, used: ftthResource.used, remaining: ftthResource.remaining } : null,
+        },
+        events: eventSummaries,
+        totals: {
+          simAllocated: circleEvents.reduce((sum, e) => sum + e.allocatedSim, 0),
+          ftthAllocated: circleEvents.reduce((sum, e) => sum + e.allocatedFtth, 0),
+          simSold: allAssignments.reduce((sum, a) => sum + a.simSold, 0),
+          ftthSold: allAssignments.reduce((sum, a) => sum + a.ftthSold, 0),
+        },
+      };
+    }),
+
+  getHierarchicalReport: publicProcedure
+    .input(z.object({
+      employeeId: z.string().uuid(),
+    }))
+    .query(async ({ input }) => {
+      console.log("Fetching hierarchical report for employee:", input.employeeId);
+      
+      const employee = await db.select().from(employees).where(eq(employees.id, input.employeeId));
+      if (!employee[0]) throw new Error("Employee not found");
+      
+      const createdEvents = await db.select().from(events)
+        .where(eq(events.createdBy, input.employeeId));
+      
+      const managedEvents = await db.select().from(events)
+        .where(eq(events.assignedTo, input.employeeId));
+      
+      const allEventIds = [...new Set([...createdEvents.map(e => e.id), ...managedEvents.map(e => e.id)])];
+      
+      let allAssignments: any[] = [];
+      if (allEventIds.length > 0) {
+        allAssignments = await db.select().from(eventAssignments)
+          .where(sql`${eventAssignments.eventId} IN ${allEventIds}`);
+      }
+      
+      const allEvents = [...createdEvents, ...managedEvents.filter(e => !createdEvents.find(c => c.id === e.id))];
+      
+      const eventReports = allEvents.map(event => {
+        const eventAssigns = allAssignments.filter(a => a.eventId === event.id);
+        const simDistributed = eventAssigns.reduce((sum, a) => sum + a.simTarget, 0);
+        const ftthDistributed = eventAssigns.reduce((sum, a) => sum + a.ftthTarget, 0);
+        const simSold = eventAssigns.reduce((sum, a) => sum + a.simSold, 0);
+        const ftthSold = eventAssigns.reduce((sum, a) => sum + a.ftthSold, 0);
+        
+        return {
+          id: event.id,
+          name: event.name,
+          circle: event.circle,
+          status: event.status,
+          startDate: event.startDate,
+          endDate: event.endDate,
+          isCreator: event.createdBy === input.employeeId,
+          isManager: event.assignedTo === input.employeeId,
+          teamCount: eventAssigns.length,
+          resources: {
+            sim: { allocated: event.allocatedSim, distributed: simDistributed, sold: simSold, remaining: event.allocatedSim - simSold },
+            ftth: { allocated: event.allocatedFtth, distributed: ftthDistributed, sold: ftthSold, remaining: event.allocatedFtth - ftthSold },
+          },
+        };
+      });
+      
+      return {
+        employee: { id: employee[0].id, name: employee[0].name, role: employee[0].role, circle: employee[0].circle },
+        eventsManaged: eventReports.length,
+        summary: {
+          totalSimAllocated: eventReports.reduce((sum, e) => sum + e.resources.sim.allocated, 0),
+          totalFtthAllocated: eventReports.reduce((sum, e) => sum + e.resources.ftth.allocated, 0),
+          totalSimSold: eventReports.reduce((sum, e) => sum + e.resources.sim.sold, 0),
+          totalFtthSold: eventReports.reduce((sum, e) => sum + e.resources.ftth.sold, 0),
+        },
+        events: eventReports,
+      };
     }),
 });

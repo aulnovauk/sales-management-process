@@ -44,6 +44,13 @@ export default function LoginScreen() {
       return;
     }
 
+    // Validate email format on client side
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRegex.test(identifier.trim())) {
+      Alert.alert('Invalid Email', 'Please enter a valid email address (e.g., yourname@example.com)');
+      return;
+    }
+
     setIsLoading(true);
 
     const normalizedEmail = identifier.trim().toLowerCase();
@@ -113,12 +120,19 @@ export default function LoginScreen() {
           
           console.log('Final error message:', message);
           
-          if (message.toLowerCase().includes('not found')) {
+          // Handle Zod validation errors with user-friendly messages
+          if (message.toLowerCase().includes('invalid_format') || 
+              message.toLowerCase().includes('invalid email') ||
+              message.toLowerCase().includes('invalid_string')) {
+            Alert.alert('Invalid Email', 'Please enter a valid email address (e.g., yourname@example.com)');
+          } else if (message.toLowerCase().includes('not found')) {
             Alert.alert('Error', 'Email not found. Please register first.');
           } else if (message.toLowerCase().includes('deactivated')) {
             Alert.alert('Account Deactivated', 'Your account has been deactivated. Please contact your administrator.');
           } else if (message.toLowerCase().includes('invalid password')) {
             Alert.alert('Error', 'Invalid password. Please try again.');
+          } else if (message.toLowerCase().includes('too_small') || message.toLowerCase().includes('required')) {
+            Alert.alert('Error', 'Please fill in all required fields.');
           } else {
             Alert.alert('Error', message);
           }

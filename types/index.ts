@@ -94,8 +94,10 @@ export interface SalesReport {
   salesStaffId: string;
   simsSold: number;
   simsActivated: number;
+  activatedMobileNumbers?: string[];
   ftthLeads: number;
   ftthInstalled: number;
+  activatedFtthIds?: string[];
   customerType: 'B2C' | 'B2B' | 'Government' | 'Enterprise';
   photos: string[];
   gpsLocation?: {
