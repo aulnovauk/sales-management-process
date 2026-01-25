@@ -32,6 +32,19 @@ export const subtaskPriorityEnum = pgEnum('subtask_priority', ['low', 'medium', 
 
 export const salesReportStatusEnum = pgEnum('sales_report_status', ['pending', 'approved', 'rejected']);
 
+export const notificationTypeEnum = pgEnum('notification_type', [
+  'EVENT_ASSIGNED',
+  'EVENT_STATUS_CHANGED',
+  'ISSUE_RAISED',
+  'ISSUE_ESCALATED',
+  'ISSUE_RESOLVED',
+  'ISSUE_STATUS_CHANGED',
+  'SUBTASK_ASSIGNED',
+  'SUBTASK_DUE_SOON',
+  'SUBTASK_OVERDUE',
+  'SUBTASK_COMPLETED'
+]);
+
 export const auditEntityTypeEnum = pgEnum('audit_entity_type', ['EVENT', 'SALES', 'RESOURCE', 'ISSUE', 'EMPLOYEE']);
 
 export const employees = pgTable('employees', {
@@ -245,6 +258,33 @@ export const employeeMaster = pgTable('employee_master', {
   isLinked: boolean('is_linked').default(false),
   linkedEmployeeId: uuid('linked_employee_id').references(() => employees.id),
   linkedAt: timestamp('linked_at'),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+  updatedAt: timestamp('updated_at').defaultNow().notNull(),
+});
+
+export const notifications = pgTable('notifications', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  recipientId: uuid('recipient_id').notNull().references(() => employees.id),
+  type: notificationTypeEnum('type').notNull(),
+  title: varchar('title', { length: 255 }).notNull(),
+  message: text('message').notNull(),
+  entityType: varchar('entity_type', { length: 50 }),
+  entityId: uuid('entity_id'),
+  isRead: boolean('is_read').default(false).notNull(),
+  readAt: timestamp('read_at'),
+  metadata: jsonb('metadata').$type<Record<string, unknown>>().default({}),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+  dedupeKey: varchar('dedupe_key', { length: 255 }),
+});
+
+export const pushTokens = pgTable('push_tokens', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  employeeId: uuid('employee_id').notNull().references(() => employees.id),
+  token: varchar('token', { length: 255 }).notNull().unique(),
+  platform: varchar('platform', { length: 20 }).notNull(),
+  isActive: boolean('is_active').default(true).notNull(),
+  lastUsedAt: timestamp('last_used_at'),
+  failureCount: integer('failure_count').default(0).notNull(),
   createdAt: timestamp('created_at').defaultNow().notNull(),
   updatedAt: timestamp('updated_at').defaultNow().notNull(),
 });

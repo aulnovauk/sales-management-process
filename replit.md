@@ -48,6 +48,34 @@ The app uses the following main tables:
 - **event_assignments**: Employee-to-event assignments with targets
 - **event_sales_entries**: Individual sales records
 - **audit_logs**: Activity tracking
+- **notifications**: Real-time notifications for users (event assignments, issues, subtasks)
+- **push_tokens**: Expo push notification tokens for mobile devices
+
+## Real-Time Notification System
+The app implements a production-grade notification system:
+
+### Notification Types
+- **EVENT_ASSIGNED**: When a user is assigned to an event/work
+- **EVENT_STATUS_CHANGED**: When event status changes
+- **ISSUE_RAISED**: When a new issue is reported on an event
+- **ISSUE_RESOLVED**: When an issue is marked as resolved
+- **ISSUE_STATUS_CHANGED**: When issue status changes
+- **ISSUE_ESCALATED**: When an issue is escalated
+- **SUBTASK_ASSIGNED**: When a subtask is assigned to a user
+- **SUBTASK_COMPLETED**: When a subtask is marked complete
+- **SUBTASK_DUE_SOON**: When a subtask is approaching its due date
+- **SUBTASK_OVERDUE**: When a subtask has passed its due date
+
+### Security
+- All notification endpoints use protected procedures with server-side authentication
+- Employee ID is derived from the `x-employee-id` header (set automatically by the client)
+- Users can only access/modify their own notifications and push tokens
+
+### Components
+- **NotificationBell**: Header component showing unread count with polling (30s interval)
+- **Notifications Screen**: Full list of notifications with filtering and mark as read
+- **Push Notifications**: Expo push notifications for mobile devices (development build required)
+- **Notification Service**: Backend service that creates notifications when events occur
 
 ## Employee Hierarchy System
 - Admins can import official employee master data via CSV upload at /admin

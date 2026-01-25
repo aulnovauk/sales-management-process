@@ -8,6 +8,7 @@ import { useMemo, useState } from 'react';
 import React from "react";
 import { Event } from '@/types';
 import Svg, { Circle } from 'react-native-svg';
+import NotificationBell from '@/components/NotificationBell';
 
 const MAX_DISPLAYED_WORKS = 3;
 
@@ -136,11 +137,12 @@ export default function DashboardScreen() {
       />
       <ScrollView style={styles.container}>
         <View style={styles.header}>
-          <View>
+          <View style={styles.headerLeft}>
             <Text style={styles.greeting}>Welcome back,</Text>
             <Text style={styles.name}>{employee?.name}</Text>
             <Text style={styles.role}>{employee?.designation} - {employee?.circle}</Text>
           </View>
+          <NotificationBell />
         </View>
 
         <View style={styles.statsGrid}>
@@ -568,6 +570,12 @@ const styles = StyleSheet.create({
     padding: 20,
     paddingTop: 60,
     paddingBottom: 30,
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'flex-start',
+  },
+  headerLeft: {
+    flex: 1,
   },
   greeting: {
     fontSize: 16,
